@@ -7,6 +7,8 @@ import {
   completeWeeks,
   describe,
   edgeMessage,
+  existsAt,
+  nearestExisting,
   frontier,
   isLit,
   move,
@@ -20,10 +22,11 @@ import {
 } from "./archive-tree.js";
 import * as sound from "./archive-sound.js";
 import { startTogether } from "./archive-together.js";
+import { startTimeline } from "./archive-timeline.js";
 
 /** @typedef {import("./archive-tree.js").Move} Move */
 
-const KEYS = /** @type {Record<string, Move | "open" | "wave" | "person">} */ ({
+const KEYS = /** @type {Record<string, Move | "open" | "wave" | "person" | "time" | "play" | "prev" | "next" | "prevSeal" | "nextSeal">} */ ({
   ArrowUp: "up",
   ArrowDown: "down",
   ArrowLeft: "left",
@@ -39,6 +42,13 @@ const KEYS = /** @type {Record<string, Move | "open" | "wave" | "person">} */ ({
   W: "wave",
   p: "person",
   P: "person",
+  t: "time",
+  T: "time",
+  " ": "play",
+  ",": "prev",
+  ".": "next",
+  "<": "prevSeal",
+  ">": "nextSeal",
 });
 
 const timeFormat = new Intl.DateTimeFormat("en-AU", {
@@ -115,7 +125,8 @@ async function main() {
   const switches = el("div", { class: "switches", role: "group", "aria-label": "Sky settings" });
   const pauseBtn = el("button", { type: "button", class: "switch", "aria-pressed": "false" }, "Pause orbits");
   const soundBtn = el("button", { type: "button", class: "switch", "aria-pressed": "false" }, "Sound");
-  switches.append(pauseBtn, soundBtn);
+  const timeBtn = el("button", { type: "button", class: "switch", "aria-pressed": "false" }, "Time travel");
+  switches.append(timeBtn, pauseBtn, soundBtn);
   const announce = el("p", { class: "sr-only", "aria-live": "polite" });
 
   const preview = el("section", { class: "preview", "aria-label": "Selected mark" });
@@ -135,7 +146,8 @@ async function main() {
   const rSend = el("button", { type: "submit" }, "Reply");
   reply.append(el("label", { for: "reply-name" }, "Your name"), rName, rBodyLabel, rBody, rSend);
   const sealedLine = el("p", { class: "preview-sealed" }, "Sealed: nothing can be added to this week now.");
-  preview.append(reply, sealedLine);
+  const rewindBtn = el("button", { type: "button", class: "preview-rewind" }, "Rewind to when this was posted");
+  preview.append(reply, sealedLine, rewindBtn);
 
   const dpad = el("div", { class: "dpad", role: "group", "aria-label": "Move through the tree" });
   /** @type {[Move, string, string][]} */
@@ -164,6 +176,10 @@ async function main() {
     ["Home", "back to this week"],
     ["W", "wave at whoever's here"],
     ["P", "fly to the next person here"],
+    ["T", "time travel on / off (Esc leaves it)"],
+    ["Space", "play history from the scrub point"],
+    [", .", "previous / next mark in time"],
+    ["Shift + , .", "previous / next seal"],
   ]) {
     dl.append(el("dt", {}, k), el("dd", {}, v));
   }
@@ -220,7 +236,12 @@ async function main() {
       rBodyLabel.textContent = sel?.isRoot ? "Leave a mark on this week" : `Reply to ${sel?.name ?? "this"}`;
     }
     sealedLine.hidden = Boolean(open || !sel || (hovered !== null && hovered !== selected));
+    rewindBtn.hidden = Boolean(!sel || sel.isRoot || (hovered !== null && hovered !== selected));
   }
+  rewindBtn.addEventListener("click", () => {
+    const n = tree.nodes.get(selected);
+    if (n) timeline.rewindTo(n.t);
+  });
 
   reply.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -342,15 +363,19 @@ async function main() {
   // A hook for checks and curious devtools users; holds no private data.
   Object.assign(window, { __archive: { stats: scene.stats, selected: () => selected } });
 
-  /** Arrive at a mark: by key, D-pad, click or deep link. @param {number} id */
-  function select(id) {
-    const first = light(id);
+  /**
+   * Arrive at a mark: by key, D-pad, click or deep link. Spectating (time
+   * travel moving you, playback following) shows it without lighting it.
+   * @param {number} id @param {{ spectate?: boolean, quiet?: boolean }} [opts]
+   */
+  function select(id, { spectate = false, quiet = false } = {}) {
+    const first = !spectate && light(id);
     selected = id;
     hovered = null;
-    scene.select(id, { strength: first ? "full" : "small" });
+    scene.select(id, { strength: first ? "full" : spectate ? "none" : "small" });
     showPreview();
     updateFog();
-    announce.textContent = `${first ? "New. " : ""}${describe(tree, id)}`;
+    if (!quiet) announce.textContent = `${first ? "New. " : ""}${describe(tree, id)}`;
     together.moved();
     // Track position in the URL without a history entry per keypress.
     history.replaceState(null, "", `#m-${id}`);
@@ -364,7 +389,12 @@ async function main() {
   /** @param {Move} m */
   function go(m) {
     together.userMoved();
-    const next = move(tree, selected, m, scene.order());
+    let next = move(tree, selected, m, scene.order());
+    // in time travel, only through marks that existed at the scrub time
+    if (next !== null && timeline.active() && !existsAt(tree, next, timeline.time())) {
+      next = m === "home" ? nearestExisting(tree, next, timeline.time()) : null;
+      if (next === selected) next = null;
+    }
     if (next === null) {
       sound.thud();
       scene.bump(m);
@@ -387,8 +417,22 @@ async function main() {
     if (e.target !== document.body && e.target !== stage) return;
     const action = KEYS[e.key];
     if (!action) return;
+    // Esc leaves time travel while it's on, and means "up" otherwise; Space
+    // only plays inside time travel.
+    if (e.key === "Escape" && timeline.active()) {
+      e.preventDefault();
+      timeline.exit();
+      return;
+    }
+    if (action === "play" && !timeline.active()) return;
     e.preventDefault();
-    if (action === "open") open(selected);
+    if (action === "time") timeline.toggle();
+    else if (action === "play") timeline.playPause();
+    else if (action === "prev") timeline.step(-1);
+    else if (action === "next") timeline.step(1);
+    else if (action === "prevSeal") timeline.jumpSeal(-1);
+    else if (action === "nextSeal") timeline.jumpSeal(1);
+    else if (action === "open") open(selected);
     else if (action === "wave") together.wave();
     else if (action === "person") together.next();
     else go(action);
@@ -432,6 +476,7 @@ async function main() {
       scene.setTree(tree, { born: mark.id });
       updateFog();
       showPreview();
+      timeline.treeChanged();
       if (mark.mine) rName.value = mark.name;
     },
     addWeek(week, root) {
@@ -440,13 +485,33 @@ async function main() {
       scene.setTree(tree, { week: root.id });
       updateFog();
       showPreview();
+      timeline.treeChanged();
       const text = `${old?.body ?? "Last week"} has sealed. ${week.label} has begun.`;
       announce.textContent = "";
       requestAnimationFrame(() => (announce.textContent = text));
     },
-    timeTravelling: () => false,
+    timeTravelling: () => timeline.active(),
     ownName: () => rName.value.trim(),
   });
+
+  // ---- time travel ----------------------------------------------------------------
+  const timeline = startTimeline({
+    scene,
+    hud,
+    tree: () => tree,
+    selected: () => selected,
+    select: (id, opts) => select(id, opts),
+    announce: (text) => {
+      announce.textContent = "";
+      requestAnimationFrame(() => (announce.textContent = text));
+    },
+    changed: () => {
+      timeBtn.setAttribute("aria-pressed", String(timeline.active()));
+      together.moved();
+    },
+    reducedMotion: () => reduce.matches,
+  });
+  timeBtn.addEventListener("click", () => timeline.toggle());
 
   // A deep link is an arrival too.
   const firstLit = light(selected);

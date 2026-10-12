@@ -78,6 +78,16 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
   let motion = !reducedMotion;
   let paused = false;
   const glow = glowTexture();
+  // Mode state the frame reads: time travel, fog of war.
+  let timeTravel = false;
+  let ttTime = 0;
+  let rewinding = false;
+  /** @type {Set<number>} */
+  let frontier = new Set();
+  /** @type {Set<number>} */
+  let complete = new Set();
+
+
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
@@ -246,7 +256,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     const node = tree.nodes.get(id);
     if (!b || !node) return;
     if (node.isRoot) {
-      const live = id === model.weeks[0];
+      const live = id === model.weeks[0] && !timeTravel;
       b.who.textContent = live ? `${node.body} · now` : node.body;
       const n = model.order.get(id)?.filter((k) => !tree.nodes.get(k)?.isRoot).length ?? 0;
       b.what.textContent = n === 0 ? "No marks" : n === 1 ? "1 mark" : `${n} marks`;
@@ -598,8 +608,8 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
   function sealFlash(rootId) {
     const b = bodies.get(rootId);
     if (!b) return;
-    b.flare = 1;
     if (!motion) return;
+    b.flare = 1;
     const size = disp.get(rootId)?.size ?? 1;
     shockwave(rootId, size, new THREE.Color(1.6, 1.5, 1.3), 0.7);
   }
@@ -826,7 +836,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
 
       const haloMat = /** @type {THREE.SpriteMaterial} */ (b.halo.material);
       haloMat.color.copy(colour);
-      const haloScale = isStar ? (weekIndex === 0 ? 7.5 : 5) : 3.2;
+      const haloScale = isStar ? (weekIndex === 0 ? 5.5 : 4.2) : 3.2;
       haloMat.opacity = isStar ? (weekIndex === 0 ? 0.6 + Math.sin(ts * 0.7) * 0.05 * (motion ? 1 : 0) : 0.45) : 0.16 * b.lit;
       b.halo.scale.setScalar(s * haloScale * (1 + b.flare));
       b.halo.position.copy(b.pos);
@@ -1017,6 +1027,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     }
 
     updateWisps(ts, dt);
+    updateThread(ts);
 
     controls.target.add(extra);
     camera.position.add(extra);
@@ -1230,13 +1241,114 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     return obj;
   }
 
-  // Hooks for the later parts; plain state the frame reads.
-  let timeTravel = false;
-  let rewinding = false;
-  /** @type {Set<number>} */
-  let frontier = new Set();
-  /** @type {Set<number>} */
-  let complete = new Set();
+
+  // ---- the time line: a thread through the marks in posting order -------------------
+  const THREAD_SEG = 10;
+  let threadCap = 0;
+  const threadMaterial = new THREE.LineBasicMaterial({
+    color: new THREE.Color(0.95, 0.55, 1.25),
+    transparent: true,
+    opacity: 0.55,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  const thread = new THREE.Line(new THREE.BufferGeometry(), threadMaterial);
+  thread.frustumCulled = false;
+  thread.visible = false;
+  world.add(thread);
+  const tailMaterial = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    toneMapped: false,
+  });
+  const TAIL = 18;
+  const tailGeometry = new THREE.BufferGeometry();
+  tailGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(TAIL * 3), 3));
+  {
+    const c = new Float32Array(TAIL * 3);
+    for (let i = 0; i < TAIL; i++) {
+      const k = (1 - i / TAIL) ** 1.5 * 2;
+      c.set([1.4 * k, 0.9 * k, 1.6 * k], i * 3);
+    }
+    tailGeometry.setAttribute("color", new THREE.BufferAttribute(c, 3));
+  }
+  const tail = new THREE.Line(tailGeometry, tailMaterial);
+  tail.frustumCulled = false;
+  tail.visible = false;
+  world.add(tail);
+  const comet = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: glow, color: new THREE.Color(2.2, 1.6, 2.6), transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }),
+  );
+  comet.scale.setScalar(0.9);
+  comet.visible = false;
+  world.add(comet);
+  /** @type {number[] | null} */
+  let threadIds = null;
+  let headId = /** @type {number | null} */ (null);
+  let headAt = 0;
+
+  /** A gentle arc from a to b, lifted so the thread reads as its own layer. */
+  function arcPoint(a, b, u, out) {
+    const lift = a.distanceTo(b) * 0.18 + 0.15;
+    out.copy(a).lerp(b, u);
+    out.y += Math.sin(Math.PI * u) * lift;
+    return out;
+  }
+
+  /** @param {number} ts */
+  function updateThread(ts) {
+    const on = timeTravel && threadIds !== null && threadIds.length > 0;
+    thread.visible = on;
+    comet.visible = on;
+    tail.visible = on && motion;
+    if (!on || !threadIds) return;
+    const need = threadIds.length * THREAD_SEG + 1;
+    if (need > threadCap) {
+      threadCap = Math.max(need, threadCap * 2, 64);
+      thread.geometry.dispose();
+      thread.geometry = new THREE.BufferGeometry();
+      thread.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(threadCap * 3), 3));
+    }
+    const arr = /** @type {Float32Array} */ (thread.geometry.attributes.position.array);
+    const pts = threadIds.map((id) => posOf(id));
+    // the newest hop is drawn growing as the comet flies it
+    const last = threadIds.at(-1) ?? null;
+    if (last !== headId) {
+      headId = last;
+      headAt = ts;
+    }
+    const grow = motion ? clamp01((ts - headAt) / 0.45) : 1;
+    const p = new THREE.Vector3();
+    let n = 0;
+    if (pts.length === 1) {
+      arr.set([pts[0].x, pts[0].y, pts[0].z], 0);
+      n = 1;
+    }
+    for (let i = 1; i < pts.length; i++) {
+      const isHead = i === pts.length - 1;
+      for (let k = i === 1 ? 0 : 1; k <= THREAD_SEG; k++) {
+        const u = (k / THREAD_SEG) * (isHead ? easeOut(grow) : 1);
+        arcPoint(pts[i - 1], pts[i], u, p);
+        arr.set([p.x, p.y, p.z], n * 3);
+        n++;
+      }
+    }
+    thread.geometry.setDrawRange(0, n);
+    thread.geometry.attributes.position.needsUpdate = true;
+    // The comet rides the head, a short fading tail behind it.
+    const head = new THREE.Vector3(arr[(n - 1) * 3], arr[(n - 1) * 3 + 1], arr[(n - 1) * 3 + 2]);
+    comet.position.copy(head);
+    comet.scale.setScalar(0.9 * (motion ? 1 + Math.sin(ts * 9) * 0.12 : 1));
+    const tarr = /** @type {Float32Array} */ (tailGeometry.attributes.position.array);
+    for (let i = 0; i < TAIL; i++) {
+      const j = Math.max(0, n - 1 - i);
+      tarr.set([arr[j * 3], arr[j * 3 + 1], arr[j * 3 + 2]], i * 3);
+    }
+    tailGeometry.attributes.position.needsUpdate = true;
+  }
 
   renderer.setAnimationLoop(frame);
 
@@ -1280,7 +1392,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
       for (const id of tree.nodes.keys()) if (!bodies.has(id)) makeBody(id);
       const spiral = new Set();
       if (born !== undefined) for (let p = born; p !== null && p !== undefined; p = tree.nodes.get(p)?.parentId) spiral.add(p);
-      if (!timeTravel) rebuild(liveNow(), { spiral: born === undefined ? undefined : spiral, dur: 1.5 });
+      rebuild(timeTravel ? ttTime : liveNow(), { spiral: born === undefined ? undefined : spiral, dur: 1.5 });
       for (const id of tree.nodes.keys()) restyle(id);
       for (const id of [born, week]) {
         const d = id === undefined ? undefined : disp.get(id);
@@ -1378,6 +1490,41 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
         w.speech.obj.element.remove();
       }
       w.speech = { obj: speechBubble(text), until };
+    },
+    /**
+     * Time travel: show the sky as it was at `t` (null: back to now). Marks
+     * posted after it shrink away and their rings retract; scrubbing forward
+     * regrows them.
+     * @param {number | null} t
+     */
+    setTime(t) {
+      if (t === null) {
+        timeTravel = false;
+        rewinding = false;
+        container.classList.remove("rewinding");
+        rebuild(liveNow(), { dur: 1.2 });
+        return;
+      }
+      timeTravel = true;
+      ttTime = t;
+      rebuild(t, { dur: 0.6 });
+    },
+    /** @param {boolean} on dust flows backward and the sky cools while rewinding */
+    setRewinding(on) {
+      rewinding = on;
+      container.classList.toggle("rewinding", on);
+    },
+    /** @param {number[] | null} ids the marks so far, in posting order */
+    setThread(ids) {
+      threadIds = ids;
+    },
+    /** Playback crossed a seal: the week that just ended flashes and locks. @param {number} rootId */
+    sealCrossed(rootId) {
+      sealFlash(rootId);
+    },
+    /** @param {(id: number) => number} fn where a wisp shows for a mark */
+    setWispMark(fn) {
+      wispMark = fn;
     },
     /** For checks: how many bodies the scene holds and whether it's mid-flight. */
     stats: () => ({

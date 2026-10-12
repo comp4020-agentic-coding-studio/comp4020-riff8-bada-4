@@ -16,6 +16,16 @@ import {
   sealTime,
   withMark,
   withWeek,
+  existsAt,
+  historyAt,
+  nearestExisting,
+  nodesAt,
+  postingOrder,
+  replayGap,
+  replaySchedule,
+  REPLAY_MAX_GAP,
+  sealsBetween,
+  stepInTime,
 } from "../public/archive-tree.js";
 
 // The archive's keyboard rules, on a small hand-built tree (no server, no DOM):
@@ -297,4 +307,74 @@ it("rolls over to a new week: a new root on top, last week sealed beneath it", (
   expect(move(t, 40, "down")).toBeNull(); // nobody's posted in the new week yet
   expect(move(t, 30, "up")).toBe(40);
   expect(orbitModel(t, Date.parse("2026-10-12T00:00:00.000Z")).weeks).toEqual([40, 30, 20, 10]);
+});
+
+// Time travel.
+const T = (iso: string) => Date.parse(iso);
+
+it("lists marks in posting order across the whole tree, ties broken by id", () => {
+  expect(postingOrder(tree)).toEqual([11, 21, 22, 23, 24, 31, 32, 33]);
+  const tied = withMark(tree, { ...tree.nodes.get(32)!, id: 35, parentId: 30, children: [], childCount: 0, createdAt: MARK_TIMES[32] });
+  expect(postingOrder(tied).slice(-3)).toEqual([32, 35, 33]);
+});
+
+it("knows what existed at a moment, including week roots that didn't yet", () => {
+  const at = T("2026-09-29T01:30:00.000Z");
+  expect([...nodesAt(tree, at)].sort((a, b) => a - b)).toEqual([10, 11, 20, 21]);
+  expect(existsAt(tree, 30, at)).toBe(false);
+  // before the first week, nothing at all
+  expect(nodesAt(tree, T("2026-09-01T00:00:00.000Z")).size).toBe(0);
+  // a week root exists from exactly its own start, which is the last seal
+  expect(existsAt(tree, 30, T(ROOT_TIMES[30]))).toBe(true);
+  expect(existsAt(tree, 30, T(ROOT_TIMES[30]) - 1)).toBe(false);
+});
+
+it("steps to the next and previous mark in time", () => {
+  expect(stepInTime(tree, T("2026-09-29T01:30:00.000Z"), 1)).toBe(22);
+  expect(stepInTime(tree, T("2026-09-29T01:30:00.000Z"), -1)).toBe(21);
+  expect(stepInTime(tree, T(MARK_TIMES[22]), 1, 22)).toBe(23);
+  expect(stepInTime(tree, T(MARK_TIMES[22]), -1, 22)).toBe(21);
+  expect(stepInTime(tree, T("2026-09-01T00:00:00.000Z"), -1)).toBeNull();
+  expect(stepInTime(tree, T("2026-09-01T00:00:00.000Z"), 1)).toBe(11);
+  expect(stepInTime(tree, T(MARK_TIMES[33]), 1, 33)).toBeNull();
+  // two marks at the same moment still step one at a time
+  const tied = withMark(tree, { ...tree.nodes.get(32)!, id: 35, parentId: 30, children: [], childCount: 0, createdAt: MARK_TIMES[32] });
+  expect(stepInTime(tied, T(MARK_TIMES[32]), 1, 32)).toBe(35);
+  expect(stepInTime(tied, T(MARK_TIMES[32]), -1, 35)).toBe(32);
+});
+
+it("finds the seals between two moments", () => {
+  expect(sealsBetween(tree, T("2026-09-25T00:00:00.000Z"), T("2026-10-07T00:00:00.000Z"))).toEqual([
+    T(ROOT_TIMES[20]),
+    T(ROOT_TIMES[30]),
+  ]);
+  // a seal at exactly the end counts; at exactly the start doesn't
+  expect(sealsBetween(tree, T(ROOT_TIMES[20]), T(ROOT_TIMES[30]))).toEqual([T(ROOT_TIMES[30])]);
+});
+
+it("falls back to the nearest ancestor that existed", () => {
+  const at = T("2026-09-30T01:30:00.000Z"); // 23 exists, 24 doesn't yet
+  expect(nearestExisting(tree, 24, at)).toBe(23);
+  expect(nearestExisting(tree, 23, at)).toBe(23);
+  // this week's marks before this week began: the newest week that existed
+  expect(nearestExisting(tree, 33, at)).toBe(20);
+  expect(nearestExisting(tree, 30, at)).toBe(20);
+  // before anything, the oldest week
+  expect(nearestExisting(tree, 24, T("2026-09-01T00:00:00.000Z"))).toBe(10);
+});
+
+it("compresses quiet stretches in the replay clock", () => {
+  expect(replayGap(3 * 86_400_000)).toBe(REPLAY_MAX_GAP);
+  expect(replayGap(10 * 60_000)).toBeLessThan(REPLAY_MAX_GAP);
+  expect(replayGap(20 * 60_000)).toBeCloseTo(replayGap(10 * 60_000) * 2);
+  const from = T(ROOT_TIMES[30]);
+  const to = T("2026-10-11T12:00:00.000Z");
+  const s = replaySchedule(tree, from, to);
+  const total = s.at(-1)!.play;
+  expect(total).toBeLessThan(10);
+  expect(historyAt(s, 0)).toBe(from);
+  expect(historyAt(s, total)).toBe(to);
+  expect(historyAt(s, total + 5)).toBe(to);
+  // every mark gets its own moment in the replay
+  for (const id of [31, 32, 33]) expect(s.some((k) => k.history === T(MARK_TIMES[id]))).toBe(true);
 });

@@ -272,7 +272,9 @@ function systemAt(tree, rootId, at, useAge, depth0 = 0) {
     const gap = GAP(depth + 1);
     for (const [, b] of ranked) {
       const min = prevR + prevExt + b.extent + gap;
-      b.r = Math.max(min, useAge ? size + gap + b.extent + ageRadius(depth + 1, at - b.active) : 0);
+      // planets keep clear of their star's corona; moons of their planet
+      const inner = size * (depth === 0 ? 1.0 : 0.5);
+      b.r = Math.max(min + (prevExt === 0 ? inner : 0), useAge ? size + inner + gap + b.extent + ageRadius(depth + 1, at - b.active) : 0);
       prevR = b.r;
       prevExt = b.extent;
     }
@@ -569,4 +571,139 @@ export function withWeek(tree, week, root) {
     t: Date.parse(root.createdAt),
   });
   return { nodes, rootId: root.id, weekRoots: [root.id, ...tree.weekRoots] };
+}
+
+// ---- time travel ------------------------------------------------------------------
+// The tree shows who answered whom; these show when. All of it works off
+// createdAt (a week root's is its Monday 00:00), with ties broken by id.
+
+/** Every mark in the order it was said, roots excluded. @param {Tree} tree @returns {number[]} */
+export function postingOrder(tree) {
+  return [...tree.nodes.values()]
+    .filter((n) => !n.isRoot)
+    .sort((a, b) => a.t - b.t || a.id - b.id)
+    .map((n) => n.id);
+}
+
+/** Did this node exist at time t? @param {Tree} tree @param {number} id @param {number} t */
+export function existsAt(tree, id, t) {
+  const n = tree.nodes.get(id);
+  return Boolean(n && n.t <= t);
+}
+
+/** Every node that existed at time t. @param {Tree} tree @param {number} t @returns {Set<number>} */
+export function nodesAt(tree, t) {
+  const out = new Set();
+  for (const n of tree.nodes.values()) if (n.t <= t) out.add(n.id);
+  return out;
+}
+
+/**
+ * The next (dir 1) or previous (dir -1) mark in time from a moment, or null.
+ * With `fromId`, marks posted at exactly `t` are ordered by id around it, so
+ * two marks with the same createdAt still step one at a time.
+ * @param {Tree} tree @param {number} t @param {1 | -1} dir @param {number} [fromId]
+ * @returns {number | null}
+ */
+export function stepInTime(tree, t, dir, fromId) {
+  const order = postingOrder(tree);
+  const key = (/** @type {number} */ id) => {
+    const n = /** @type {TreeNode} */ (tree.nodes.get(id));
+    return [n.t, n.id];
+  };
+  const after = (/** @type {number} */ id) => {
+    const [nt, nid] = key(id);
+    if (nt !== t) return nt > t;
+    return fromId === undefined ? false : nid > fromId;
+  };
+  const before = (/** @type {number} */ id) => {
+    const [nt, nid] = key(id);
+    if (nt !== t) return nt < t;
+    return fromId === undefined ? false : nid < fromId;
+  };
+  if (dir === 1) return order.find(after) ?? null;
+  for (let i = order.length - 1; i >= 0; i--) if (before(order[i])) return order[i];
+  return null;
+}
+
+/**
+ * Seal moments (Monday 00:00 Sydney) strictly after `a` and up to `b`,
+ * oldest first: the start of every week with a root, and the seal of each.
+ * @param {Tree} tree @param {number} a @param {number} b @returns {number[]}
+ */
+export function sealsBetween(tree, a, b) {
+  const out = new Set();
+  for (const id of tree.weekRoots) {
+    const start = tree.nodes.get(id)?.t;
+    if (start !== undefined) out.add(start);
+    out.add(sealTime(tree, id));
+  }
+  return [...out].filter((s) => s > a && s <= b).sort((x, y) => x - y);
+}
+
+/**
+ * The node itself if it existed at t, else its nearest ancestor that did. A
+ * week root's ancestors are newer weeks, so past the top of the week the
+ * answer is the newest week that existed then (or the oldest, before any).
+ * @param {Tree} tree @param {number} id @param {number} t @returns {number}
+ */
+export function nearestExisting(tree, id, t) {
+  for (let n = tree.nodes.get(id); n; n = n.parentId === null ? undefined : tree.nodes.get(n.parentId)) {
+    if (n.isRoot) break;
+    if (n.t <= t) return n.id;
+  }
+  const roots = tree.weekRoots.filter((r) => existsAt(tree, r, t));
+  const own = tree.nodes.get(id);
+  // the mark's own week root, if that week had started
+  for (let n = own; n; n = n.parentId === null ? undefined : tree.nodes.get(n.parentId)) {
+    if (n.isRoot) {
+      if (n.t <= t) return n.id;
+      break;
+    }
+  }
+  return roots[0] ?? tree.weekRoots.at(-1) ?? tree.rootId;
+}
+
+// Replay speed: a busy week plays in roughly 8--10 s, and no stretch of
+// silence ever takes more than a beat.
+export const REPLAY_RATE = 0.2 / 3_600_000; // playback s per history ms: 0.2 s an hour
+export const REPLAY_MAX_GAP = 0.45; // s: the longest any quiet stretch takes
+
+/** Playback seconds for a gap in history (ms): linear, then capped. @param {number} gap */
+export function replayGap(gap) {
+  return Math.min(Math.max(0, gap) * REPLAY_RATE, REPLAY_MAX_GAP);
+}
+
+/**
+ * The replay clock: keyframes from `from` to `to` at every posting moment
+ * and seal, each gap compressed by replayGap. historyAt() reads it.
+ * @param {Tree} tree @param {number} from @param {number} to
+ * @returns {{ history: number, play: number }[]}
+ */
+export function replaySchedule(tree, from, to) {
+  const moments = new Set([from, to, ...sealsBetween(tree, from, to)]);
+  for (const n of tree.nodes.values()) if (!n.isRoot && n.t > from && n.t < to) moments.add(n.t);
+  const sorted = [...moments].sort((a, b) => a - b);
+  const out = [];
+  let play = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0) play += replayGap(sorted[i] - sorted[i - 1]);
+    out.push({ history: sorted[i], play });
+  }
+  return out;
+}
+
+/** History time at `play` seconds into a schedule. @param {{ history: number, play: number }[]} schedule @param {number} play */
+export function historyAt(schedule, play) {
+  if (schedule.length === 0) return 0;
+  if (play <= 0) return schedule[0].history;
+  for (let i = 1; i < schedule.length; i++) {
+    const a = schedule[i - 1];
+    const b = schedule[i];
+    if (play <= b.play) {
+      const span = b.play - a.play;
+      return span <= 0 ? b.history : a.history + ((play - a.play) / span) * (b.history - a.history);
+    }
+  }
+  return /** @type {{ history: number }} */ (schedule.at(-1)).history;
 }
