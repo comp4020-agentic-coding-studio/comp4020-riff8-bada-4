@@ -225,20 +225,25 @@ Edge cases worth a test: two marks with the same `createdAt`, so order must
 be stable (fall back to id). A time before the first week. A week root at
 exactly its seal time.
 
-## Part 4: together in the archive (live presence and mark-side chat)
+## Part 4: together in the archive (live presence, live branches, mark-side chat)
 
 This is the app's first real-time feature. The README currently says
-real-time "belongs to later crits", so update that. Presence and chat are
-live. Marks themselves still don't push live; new marks still appear on
-reload. Leave that alone.
+real-time "belongs to later crits", so update that. Three things go live:
+where people are, what they say at a mark, and **every new mark**. The moment
+someone posts a mark or a reply, its branch grows into everyone's archive,
+and it appears on the home page and mark pages too, without a reload.
 
 ### Transport: Server-Sent Events, no dependency
 
-- `GET /presence` is a `text/event-stream` built on plain `node:http`. Use
-  SSE, not WebSockets: SSE needs no dependency, and the rules forbid adding
-  one without justification. The browser sends updates with small
-  same-origin `fetch` POSTs. Send a comment heartbeat every ~20s so Fly's
-  proxy keeps the stream open.
+- `GET /live` is a `text/event-stream` built on plain `node:http`. Use SSE,
+  not WebSockets: SSE needs no dependency, and the rules forbid adding one
+  without justification. The browser sends updates with small same-origin
+  `fetch` POSTs. Send a comment heartbeat every ~20s so Fly's proxy keeps the
+  stream open.
+- **A stream isn't a person.** Opening `/live` gets you the events. You only
+  appear to others (`join`) once your archive client posts a position. So the
+  home and mark pages can listen for new marks without anyone showing up as
+  "here".
 - All presence and chat state lives **in server memory only**, in a new
   module (`src/presence.ts`). Never write it to SQLite and never log
   message text. A restart or deploy wipes it, and that's correct. There's
@@ -266,6 +271,8 @@ reload. Leave that alone.
   - `hello`: your presence id, plus a snapshot of everyone else
   - `join`, `move`, `leave`, `wave`
   - `say`, which goes only to people at that mark
+  - `mark`: a new mark, sent to every stream, hidden visitors included
+  - `week`: a new week root was created by the lazy rollover
   
   A person is `{ id, name, colour, markId, timeTravelling }`. `name` is the
   `name` cookie (the name they last posted under), capped at `MAX_NAME`, or
@@ -343,6 +350,66 @@ reload. Leave that alone.
 - **A second live region** announces other people's messages ("Ana: …"),
   separate from the navigation announcements.
 
+### New branches, live
+
+- **The broadcast.** After `store.post` succeeds, and only then, broadcast a
+  `mark` event on `/live`. Sealed-week rejections, blank posts and unknown
+  parents broadcast nothing. The payload has exactly the public fields
+  `/archive.json` already sends for a mark (`id`, `parentId`, `weekId`,
+  `isRoot`, `name`, `body`, `createdAt`, `childCount: 0`, `children: []`),
+  plus the parent's new `childCount`. `mine` and `seen` are worked out **per
+  recipient**, server-side, against each stream's visitor id: true for the
+  author's own streams, false for everyone else. Never `visitor_id`.
+- **Rollover stays lazy.** When a request triggers a new week root
+  (`ensureWeekIn` in `src/db.ts`), broadcast a `week` event with the new week
+  and its root. Do it through a hook or callback on the store, not a timer.
+  The rule says rollover happens on request and never on a timer, so an
+  archive left open over Monday 00:00 updates on the next request anyone
+  makes. Position posts are frequent, so that's soon.
+- **In the archive, a new branch grows in.** Add the node to the in-memory
+  tree and re-run `layout()`. A new reply widens its week, so siblings can
+  shift. Every node whose position changed **glides** to its new spot over
+  about 0.6s, and its edges bend with it. Never jump. The new edge then grows
+  out from its parent and the bubble blooms, reusing the load-time growth
+  animation. If it's someone else's mark, it arrives as an ember (Part 2),
+  with a soft sprout sound if sound is on. The frontier flicker and the HUD's
+  lit/total update. The current week can lose a "complete" crown this way;
+  let it fade off gracefully. If the camera's selected node moves, the camera
+  follows smoothly.
+- **The author.** If the author is present and visible in the archive, their
+  wisp gives a brief bright flare at the new mark's parent as it sprouts.
+  Hidden authors' marks still appear; they just aren't tied to a wisp.
+- **With time travel (Part 3):** a new mark gets a dot at the end of the
+  timeline bar and extends the thread. If you're scrubbed into the past, it
+  stays hidden until you return to now. If playback has caught up to now,
+  it sprouts as it lands.
+- **A new week, live:** on a `week` event, play the same seal-crossing
+  animation as Part 3's playback. The old week flashes and locks, and the new
+  root sprouts at the top of the spine. Announce it. If you were sitting in
+  the old current week, you stay where you are; it's simply sealed now.
+- **Grow a branch from where you are.** The preview card of a mark in the
+  current week gets a small **Reply here** form (name prefilled from the
+  `name` cookie, same limits as the mark page). It posts to the existing
+  `POST /m/<id>` handler with `Accept: application/json`. For that header
+  only, the handler answers `201 { id }` instead of the 303 redirect, and
+  `403`/`404` with a JSON reason instead of the HTML pages. The form posts
+  through the same `store.post` path, so sealing and validation are exactly
+  the same. Your new branch grows in right in front of you, already lit
+  because it's yours, with the full Part 1 ignition. Then the camera flies
+  to it. Sealed marks get no form, just the existing "sealed" line. With JS
+  off, the mark page is still where you reply.
+- **Home and mark pages, as progressive enhancement.** A small script
+  (`public/live-wall.js`, no three.js) listens on `/live`. When a `mark`
+  event arrives whose parent is the mark this page shows (the current week's
+  root, on `/`), it inserts the mark at the top of the wall. The wall is
+  newest-first (`wall()` in `src/render.ts`). An empty wall is a
+  `<p class="empty">` rather than a list, so replace it with the list.
+  Build it with DOM and `textContent` to match `markItem`'s markup exactly:
+  the name, body, time, "yours" badge and reply link. Give it a short
+  highlight that fades. Reply counts on the page's existing marks update too. The same
+  hidden-tab rule closes the stream. With JS off, these pages are exactly
+  what they are today.
+
 ### Logic and tests
 
 - `src/presence.ts` holds the session and room logic as plain functions or
@@ -367,8 +434,20 @@ the running app:
   nothing and isn't a 500. A cross-site `Sec-Fetch-Site` gets 403.
 - the no-JS `/archive/` list shows the "new" marker on an unseen mark and not
   on a seen one
-- `GET /presence` answers `text/event-stream` with a `hello`. Neither it nor
+- `GET /live` answers `text/event-stream` with a `hello`. Neither it nor
   any later event ever contains a visitor cookie's value.
+- a stream that never posts a position never appears in anyone's events
+- with A streaming, B posting a mark on `/` gives A a `mark` event with the
+  public fields and `mine: false`. B's own stream gets `mine: true`. A reply
+  on `/m/<id>` carries the right `parentId` and the parent's new
+  `childCount`.
+- a rejected post (blank, unknown parent, sealed week) broadcasts nothing
+- `POST /m/<id>` with `Accept: application/json` answers `201 { id }` and
+  the mark exists afterwards. An unknown parent is a JSON 404. Without the
+  header the 303 behaviour is unchanged.
+- in `spec/store.test.ts`, with an injected clock: the new-week hook fires
+  exactly once when a request crosses Monday 00:00 Sydney, and never on a
+  plain request within the week
 - with two visitors streaming, B moving to a mark gives A a `move` with B's
   presence id. Closing B's stream gives A a `leave` after the grace period.
 - a POST using another visitor's presence id gets 403 and broadcasts nothing.
@@ -402,7 +481,11 @@ weeks with replies, so the thread visibly hops between branches. For
 presence and chat, open two or three browser contexts with separate cookies
 and different `name` cookies. Screenshot one context watching another's wisp
 fly between branches, an off-screen chip, two wisps at one mark with the chat
-panel open, and a speech bubble. Check that hiding the tab closes the stream
+panel open, and a speech bubble. For live branches: post a reply from one
+context, both from the mark page and from the archive's Reply here, and
+screenshot the other context's archive mid-sprout with its siblings gliding
+aside. Check that a second context sitting on `/` sees the new mark appear at
+the top of its wall without a reload. Check that hiding the tab closes the stream
 and showing it again restores your wisp for the others. Check there are no
 console errors, that fast key-repeat doesn't snap the camera, that leaving
 time travel restores the full tree, that typing in chat never moves you, and
@@ -425,9 +508,11 @@ happen. Add a section on being in the archive together. A room of a dozen
 mostly meets at crits, and this makes the archive somewhere you can bump into
 each other. Chat is deliberately ephemeral: marks are what you keep, chat is
 what you say while standing there. That's why chatting in a sealed week
-doesn't break the seal. Rewrite "What's deliberately not here yet" to match:
-presence is live, marks still aren't. Add the new keys to the README's
-archive section.
+doesn't break the seal. Say that new marks now arrive live, everywhere,
+and that the week still rolls over lazily: an open archive sees the seal on
+the next request, not on a timer. Rewrite "What's deliberately not here yet"
+so it no longer claims real-time is missing. Add the new keys to the
+README's archive section.
 
 Add two lines to the rules block in `CLAUDE.md` (below the riff block, which
 stays untouched):
@@ -438,14 +523,19 @@ stays untouched):
   logged. They use ephemeral presence ids, never `visitor_id`, over SSE with
   no dependency, and every POST is checked against the visitor cookie that
   owns the presence id.
+- a live `mark` event carries only the fields `/archive.json` already
+  exposes. `mine` and `seen` are worked out per recipient. It's broadcast
+  only after a successful `store.post`.
 
 ## Leave alone
 
 - No accounts, no new dependencies (Web Audio, SSE and three.js cover all of
   this, so no `ws` and no socket library), no build step, no CDN. Chat names
   come from the existing `name` cookie; don't add a profile or a sign-in.
-- Posting, replying, sealing, week arithmetic and the lazy rollover. None of
-  it changes.
+- Posting, replying, sealing, week arithmetic and the lazy rollover. The
+  rules don't change. Posting only gains a broadcast after success and a
+  JSON answer for `Accept: application/json`. The form-post-and-redirect
+  path behaves exactly as now.
 - What the existing keys *mean* (`move()` in `archive-tree.js`) and the tree
   layout. This run changes how movement *feels*, not where it goes. Time
   travel only hides what didn't exist yet; it never repositions nodes. Add
@@ -453,18 +543,20 @@ stays untouched):
   changing the old ones.
 - Time travel needs no server change and no schema change. Presence and chat
   need no schema change at all; they never touch SQLite.
-- The home page and mark pages get no presence or chat. They stay the plain,
-  JS-optional pages they are. Presence and chat live in the archive scene.
+- The home page and mark pages get no presence or chat, and no wisps. Their
+  only live addition is new marks appearing on the wall, as progressive
+  enhancement. With JS off they look and work exactly as they do now.
 - User text still goes in via `textContent` only on the client and
   `escapeHtml` on the server.
 - The list view stays complete and readable for screen readers and JS-off
   visitors.
 
 Commit in small, deployable steps (seen-state server + specs, game feel, fog
-of war, time travel, presence server + specs, wisps, chat, docs), and keep
-`main` green throughout. Finish each part, complete and polished, before
-starting the next, in the order 1, 2, 4, 3. Presence and chat come before
-time travel because being in the archive together is what the room asked
-for most. If you run short, a finished, good-feeling smaller game beats four
+of war, `/live` + presence server + specs, live branches, wisps, chat, time
+travel, docs), and keep `main` green throughout. Finish each part, complete
+and polished, before starting the next, in the order 1, 2, 4, 3. Presence,
+live branches and chat come before time travel because being in the archive
+together is what the room asked for most. Part 4's notes on time travel
+apply once Part 3 exists, so wire them up when you build Part 3. If you run short, a finished, good-feeling smaller game beats four
 half-done ones. Whatever didn't get built goes in the README's "not here
 yet" section, so the next run can pick it up.
