@@ -177,11 +177,12 @@ export function edgeMessage(tree, id, move) {
     case "left":
     case "right": {
       if (n?.isRoot && id === tree.rootId) return "This is this week's star. Down arrow to its planets, [ for last week.";
-      if (n?.isRoot && move === "left") return "Already the outermost orbit. Press [ for the week before this one.";
+      if (n?.isRoot && move === "left") return `This is the star of ${n.body}. Press [ for the week before it.`;
       if (n?.isRoot) return "Nothing further in. Down arrow to this week's planets.";
       const parent = n?.parentId === null || n?.parentId === undefined ? undefined : tree.nodes.get(n.parentId);
       const body = parent?.isRoot ? "planet" : "moon";
-      const around = parent?.isRoot ? "" : ` round ${parent?.name}'s mark. Up arrow goes back to it`;
+      const what = parent && !parent.isRoot && tree.nodes.get(parent.parentId ?? -1)?.isRoot ? "mark" : "reply";
+      const around = parent?.isRoot ? "" : ` round ${parent?.name}'s ${what}. Up arrow goes back to it`;
       return move === "left"
         ? `Already the outermost ${body}${around || ", and this is the oldest week"}.`
         : `Already the innermost ${body}: the liveliest conversation here${around}.`;
@@ -724,4 +725,26 @@ export function historyAt(schedule, play) {
     }
   }
   return /** @type {{ history: number }} */ (schedule.at(-1)).history;
+}
+
+/**
+ * A week's marks and replies (optionally only those that existed at t), and
+ * how to say it: "6 marks, 11 replies". The lit counter counts both.
+ * @param {Tree} tree @param {number} rootId @param {number} [t]
+ */
+export function weekCounts(tree, rootId, t = Infinity) {
+  const root = tree.nodes.get(rootId);
+  let marks = 0;
+  let total = 0;
+  for (const n of tree.nodes.values()) {
+    if (n.isRoot || !root || n.weekId !== root.weekId || n.t > t) continue;
+    total++;
+    if (n.parentId === rootId) marks++;
+  }
+  const replyCount = total - marks;
+  const label =
+    marks === 0
+      ? "No marks"
+      : `${marks === 1 ? "1 mark" : `${marks} marks`}${replyCount ? `, ${replyCount === 1 ? "1 reply" : `${replyCount} replies`}` : ""}`;
+  return { marks, replies: replyCount, label };
 }

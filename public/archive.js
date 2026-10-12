@@ -15,6 +15,7 @@ import {
   replies,
   totalProgress,
   weekComplete,
+  weekCounts,
   weekProgress,
   withMark,
   withSeen,
@@ -208,13 +209,16 @@ async function main() {
     const id = hovered ?? selected;
     const n = tree.nodes.get(id);
     if (!n) return;
+    const past = timeline.active() ? timeline.time() : undefined;
     if (n.isRoot) {
       pWho.textContent = n.body;
       pBody.textContent =
-        id === tree.rootId
-          ? "This week. Everything posted on the home page hangs here until 00:00 Monday."
-          : "A sealed week. Nothing can be added to it now.";
-      pMeta.textContent = n.childCount === 1 ? "1 mark" : `${n.childCount} marks`;
+        past !== undefined
+          ? `As it was at ${timeFormat.format(new Date(past))}.`
+          : id === tree.rootId
+            ? "This week. Everything posted on the home page hangs here until 00:00 Monday."
+            : "A sealed week. Nothing can be added to it now.";
+      pMeta.textContent = weekCounts(tree, id, past).label;
     } else if (!isLit(n)) {
       // A hovered ember shows who wrote it, not what they said.
       pWho.textContent = n.name;
@@ -237,7 +241,7 @@ async function main() {
       reply.hidden = !open || (hovered !== null && hovered !== selected);
       rBodyLabel.textContent = sel?.isRoot ? "Leave a mark on this week" : `Reply to ${sel?.name ?? "this"}`;
     }
-    sealedLine.hidden = Boolean(open || !sel || (hovered !== null && hovered !== selected));
+    sealedLine.hidden = Boolean(open || !sel || past !== undefined || (hovered !== null && hovered !== selected));
     rewindBtn.hidden = Boolean(!sel || sel.isRoot || (hovered !== null && hovered !== selected));
   }
   rewindBtn.addEventListener("click", () => {
@@ -314,6 +318,9 @@ async function main() {
     if (root === undefined) return;
     celebrations.delete(id);
     scene.celebrate(root);
+    progress.classList.remove("celebrate");
+    void progress.offsetWidth;
+    progress.classList.add("celebrate");
     sound.arpeggio();
     const label = tree.nodes.get(root)?.body ?? "This week";
     later(() => (announce.textContent = `${label} complete: every mark lit.`), 1200);
@@ -332,7 +339,9 @@ async function main() {
     const n = tree.nodes.get(selected);
     if (n) {
       const week = weekProgress(tree, n.weekId);
-      pWeek.textContent = `${n.label}: ${week.lit} / ${week.total} lit`;
+      const done = week.total > 0 && week.lit === week.total;
+      pWeek.textContent = `${n.label}: ${week.lit} / ${week.total} lit${done ? " · complete ✦" : ""}`;
+      progress.classList.toggle("is-complete", done);
     }
     const all = totalProgress(tree);
     pAll.textContent = `${all.lit} / ${all.total} all time`;

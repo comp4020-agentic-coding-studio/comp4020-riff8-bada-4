@@ -136,6 +136,9 @@ body.scene-on .hud { display: block; }
   white-space: nowrap;
 }
 .progress-week { color: #ffe2a8; }
+.progress.is-complete { box-shadow: 0 0 0 1px rgb(255 210 120 / 0.6); }
+.progress.celebrate { animation: crown 1.6s ease-out; }
+@keyframes crown { 0% { transform: translateX(-50%) scale(1); box-shadow: 0 0 0 2px #ffd27a, 0 0 2.5rem rgb(255 200 110 / 0.9); } 25% { transform: translateX(-50%) scale(1.12); } 100% { transform: translateX(-50%) scale(1); } }
 .progress-all { color: #8f9ab0; font-size: 0.75rem; }
 
 .preview {
@@ -374,8 +377,12 @@ body.scene-on :focus-visible { outline: 2px solid #9fd8ff; outline-offset: 2px; 
   .timeline-when { order: 5; width: 100%; text-align: center; font-size: 0.75rem; }
   .timeline-tick span { display: none; }
   body.tt-on .dpad { bottom: 8.6rem; }
-  body.tt-on .preview { bottom: calc(8.6rem + 8.75rem + 0.5rem); max-height: 16vh; }
-  .here.is-empty, .here-where { display: none; }
+  body.tt-on .preview { bottom: calc(8.6rem + 8.75rem + 0.5rem); max-height: 12vh; }
+  .here.is-empty, .here-where, .chat-note { display: none; }
+  .chat { max-height: 24vh; }
+  .preview { max-height: 22vh; }
+  .preview .reply textarea { min-height: 2rem; height: 2rem; }
+  body:has(.chat:not([hidden])) .preview { max-height: 16vh; }
   body:has(.chat:not([hidden])) .here { display: none; }
   body.tt-on .chat { bottom: auto; }
   .bubble { max-width: 8.5rem; font-size: 0.66rem; }
@@ -383,6 +390,7 @@ body.scene-on :focus-visible { outline: 2px solid #9fd8ff; outline-offset: 2px; 
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .progress.celebrate { animation: none; }
   .chat, .chat.met { animation: none; }
   .timeline { animation: none; }
   .scene-canvas { transition: none; }

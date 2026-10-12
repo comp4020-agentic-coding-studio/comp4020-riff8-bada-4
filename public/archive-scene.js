@@ -9,7 +9,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
-import { isLit as nodeLit, orbitModel, pathBetween, positionAt, snippet } from "./archive-tree.js";
+import { isLit as nodeLit, orbitModel, pathBetween, positionAt, snippet, weekCounts } from "./archive-tree.js";
 
 /** @typedef {import("./archive-tree.js").Tree} Tree */
 /** @typedef {import("./archive-tree.js").OrbitModel} OrbitModel */
@@ -261,8 +261,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     if (node.isRoot) {
       const live = id === model.weeks[0] && !timeTravel;
       b.who.textContent = live ? `${node.body} · now` : node.body;
-      const n = model.order.get(id)?.filter((k) => !tree.nodes.get(k)?.isRoot).length ?? 0;
-      b.what.textContent = n === 0 ? "No marks" : n === 1 ? "1 mark" : `${n} marks`;
+      b.what.textContent = weekCounts(tree, id, model.now).label;
     } else {
       const lit = isLit(id);
       b.who.textContent = node.name;
@@ -1248,7 +1247,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
   // ---- the time line: a thread through the marks in posting order -------------------
   const THREAD_SEG = 10;
   let threadCap = 0;
-  const THREAD_COLOUR = new THREE.Color(0.95, 0.55, 1.25);
+  const THREAD_COLOUR = new THREE.Color(1.3, 0.75, 1.7);
   const threadMaterial = new THREE.LineBasicMaterial({
     vertexColors: true,
     transparent: true,
@@ -1346,7 +1345,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     const col = /** @type {Float32Array} */ (thread.geometry.attributes.color.array);
     for (let i = 0; i < n; i++) {
       const hops = (n - 1 - i) / THREAD_SEG;
-      const k = Math.max(0.16, Math.exp(-hops / 5));
+      const k = Math.max(0.28, Math.exp(-hops / 6));
       col[i * 3] = THREAD_COLOUR.r * k;
       col[i * 3 + 1] = THREAD_COLOUR.g * k;
       col[i * 3 + 2] = THREAD_COLOUR.b * k;

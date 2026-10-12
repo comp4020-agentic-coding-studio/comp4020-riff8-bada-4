@@ -142,7 +142,8 @@ export function startTimeline(app) {
       app.scene.setWispMark((/** @type {number} */ id) => (active ? nearestExisting(tree(), id, time) : id));
     }
     setTime(t);
-    app.announce(`Time travel. ${describeTime(time)}. Drag the timeline or press Space to play, comma and full stop to step.`);
+    const present = end() - time < 60_000 ? "at the present, " : "";
+    app.announce(`Time travel, ${present}${describeTime(time)}. Drag the timeline or press Space to play, comma and full stop to step.`);
   }
 
   function exit() {

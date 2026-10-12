@@ -16,6 +16,7 @@ import {
   sealTime,
   withMark,
   withWeek,
+  weekCounts,
   existsAt,
   historyAt,
   nearestExisting,
@@ -390,4 +391,11 @@ it("compresses quiet stretches in the replay clock", () => {
   expect(historyAt(s, total + 5)).toBe(to);
   // every mark gets its own moment in the replay
   for (const id of [31, 32, 33]) expect(s.some((k) => k.history === T(MARK_TIMES[id]))).toBe(true);
+});
+
+it("counts a week's marks and replies the way the lit counter does", () => {
+  expect(weekCounts(tree, 20).label).toBe("2 marks, 2 replies");
+  expect(weekCounts(tree, 30).label).toBe("2 marks, 1 reply");
+  expect(weekCounts(tree, 30, T(MARK_TIMES[31])).label).toBe("1 mark");
+  expect(weekCounts(tree, 30, T(ROOT_TIMES[30])).label).toBe("No marks");
 });
