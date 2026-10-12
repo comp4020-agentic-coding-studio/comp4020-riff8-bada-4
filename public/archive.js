@@ -388,7 +388,7 @@ async function main() {
     scene.select(id, { strength: first ? "full" : spectate ? "none" : "small" });
     showPreview();
     updateFog();
-    if (!quiet) announce.textContent = `${first ? "New. " : ""}${describe(tree, id)}`;
+    if (!quiet) announce.textContent = `${first ? "New. " : ""}${describe(tree, id, scene.order())}`;
     together.moved();
     // Track position in the URL without a history entry per keypress.
     history.replaceState(null, "", `#m-${id}`);
@@ -531,7 +531,7 @@ async function main() {
   if (firstLit) land(selected);
   showPreview();
   updateFog();
-  announce.textContent = `${firstLit ? "New. " : ""}${describe(tree, selected)}`;
+  announce.textContent = `${firstLit ? "New. " : ""}${describe(tree, selected, scene.order())}`;
 }
 
 main();

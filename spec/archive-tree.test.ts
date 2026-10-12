@@ -240,6 +240,13 @@ it("only holds what existed at a moment", () => {
   expect(orbitModel(tree, Date.parse(ROOT_TIMES[30])).weeks).toEqual([30, 20, 10]);
 });
 
+it("says where a mark orbits when given the order", () => {
+  const order = orbitModel(tree, NOW).order;
+  expect(describe(tree, 31, order)).toMatch(/On the innermost, liveliest orbit\.$/);
+  expect(describe(tree, 32, order)).toMatch(/On the outermost, quietest orbit\.$/);
+  expect(describe(tree, 33, order)).not.toMatch(/orbit/); // an only moon
+});
+
 it("walks siblings in orbit order: ← outward to quieter, → inward to livelier", () => {
   const order = orbitModel(tree, NOW).order;
   expect(move(tree, 31, "left", order)).toBe(32);

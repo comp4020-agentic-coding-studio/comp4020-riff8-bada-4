@@ -141,12 +141,22 @@ export function firstMark(tree, id) {
 }
 
 /**
- * What the live region says when a node is selected.
- * @param {Tree} tree @param {number} id @returns {string}
+ * What the live region says when a node is selected. With the orbit order,
+ * a mark also says where it sits among its siblings, livelier inward.
+ * @param {Tree} tree @param {number} id @param {Map<number, number[]>} [order] @returns {string}
  */
-export function describe(tree, id) {
+export function describe(tree, id, order) {
   const n = tree.nodes.get(id);
   if (!n) return "";
+  if (!n.isRoot && order && n.parentId !== null) {
+    const sibs = (order.get(n.parentId) ?? []).filter((s) => !tree.nodes.get(s)?.isRoot);
+    const at = sibs.indexOf(id);
+    if (sibs.length > 1 && at !== -1) {
+      const where =
+        at === sibs.length - 1 ? "the innermost, liveliest orbit" : at === 0 ? "the outermost, quietest orbit" : `orbit ${sibs.length - at} of ${sibs.length} from the centre`;
+      return `${describe(tree, id)} On ${where}.`;
+    }
+  }
   if (n.isRoot) {
     const state = id === tree.rootId ? "this week" : "sealed";
     const count = n.childCount === 1 ? "1 mark" : `${n.childCount} marks`;
