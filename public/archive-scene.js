@@ -28,7 +28,7 @@ const COLOURS = {
   ringDim: new THREE.Color(0.12, 0.16, 0.2),
   arm: new THREE.Color(1.0, 0.78, 0.5),
   pulse: new THREE.Color(2.6, 2.3, 1.6),
-  crown: new THREE.Color(1.8, 1.3, 0.5),
+  crown: new THREE.Color(2.2, 1.6, 0.55),
 };
 // Stars cool with age: gold, amber, deep red.
 const STAR_AGES = [new THREE.Color(1.6, 1.12, 0.45), new THREE.Color(1.25, 0.62, 0.22), new THREE.Color(0.95, 0.32, 0.14), new THREE.Color(0.6, 0.16, 0.1)];
@@ -210,10 +210,10 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
       world.add(ring);
     } else {
       crown = new THREE.Mesh(
-        new THREE.TorusGeometry(1, 0.025, 6, 96),
+        new THREE.TorusGeometry(1, 0.04, 6, 96),
         new THREE.MeshBasicMaterial({ color: COLOURS.crown, toneMapped: false, transparent: true, opacity: 0 }),
       );
-      crown.rotation.x = Math.PI / 2;
+      crown.rotation.x = Math.PI / 2 - 0.35;
       world.add(crown);
       // every sealed week wears a thin pale seal ring
       seal = new THREE.Mesh(
@@ -872,7 +872,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
         mat.opacity += (want * 0.85 - mat.opacity) * Math.min(1, dt * (want ? 2 : 0.8));
         b.crown.visible = mat.opacity > 0.01 && b.mesh.visible;
         b.crown.position.copy(b.pos);
-        b.crown.scale.setScalar(s * 1.9 * (motion ? 1 + Math.sin(ts * 1.2) * 0.03 : 1));
+        b.crown.scale.setScalar(s * 2.5 * (motion ? 1 + Math.sin(ts * 1.2) * 0.03 : 1));
       }
 
       if (b.seal) {

@@ -289,33 +289,40 @@ async function main() {
   const lighting = new Set();
   /** @type {Map<number, number>} landing on this mark completes this week root */
   const celebrations = new Map();
+  /** The tree as the scene draws it: marks still being flown to stay dark until you land. */
+  function shown() {
+    let t = tree;
+    for (const id of lighting) {
+      const n = t.nodes.get(id);
+      if (n) t = { ...t, nodes: new Map(t.nodes).set(id, { ...n, seen: false }) };
+    }
+    return t;
+  }
+
+  /** Light a mark in the scene (you landed, or flew on past it), celebrating a finished week. @param {number} id */
+  function land(id) {
+    lighting.delete(id);
+    scene.refresh(shown());
+    updateFog();
+    const root = celebrations.get(id);
+    if (root === undefined) return;
+    celebrations.delete(id);
+    scene.celebrate(root);
+    sound.arpeggio();
+    const label = tree.nodes.get(root)?.body ?? "This week";
+    later(() => (announce.textContent = `${label} complete: every mark lit.`), 1200);
+  }
+
   scene.onArrive((id, strength) => {
     const n = tree.nodes.get(id);
-    if (lighting.has(id)) {
-      lighting.delete(id);
-      scene.refresh(tree);
-      updateFog();
-    }
     if (n && strength === "full") sound.chime();
     else if (n) sound.tick(n.depth + (n.isRoot ? 0 : 1));
-    const root = celebrations.get(id);
-    if (root !== undefined) {
-      celebrations.delete(id);
-      scene.celebrate(root);
-      sound.arpeggio();
-      const label = tree.nodes.get(root)?.body ?? "This week";
-      later(() => (announce.textContent = `${label} complete: every mark lit.`), 1200);
-    }
+    if (lighting.has(id)) land(id);
   });
 
   function updateFog() {
-    // The scene only learns a mark is lit when you land on it.
-    let shown = tree;
-    for (const id of lighting) {
-      const n = shown.nodes.get(id);
-      if (n) shown = { ...shown, nodes: new Map(shown.nodes).set(id, { ...n, seen: false }) };
-    }
-    scene.setFog({ frontier: frontier(shown), complete: completeWeeks(shown) });
+    const drawn = shown();
+    scene.setFog({ frontier: frontier(drawn), complete: completeWeeks(drawn) });
     const n = tree.nodes.get(selected);
     if (n) {
       const week = weekProgress(tree, n.weekId);
@@ -372,6 +379,8 @@ async function main() {
    * @param {number} id @param {{ spectate?: boolean, quiet?: boolean }} [opts]
    */
   function select(id, { spectate = false, quiet = false } = {}) {
+    // a flight cut short by this one still lit what it was flying to
+    for (const pending of [...lighting]) if (pending !== id) land(pending);
     const first = !spectate && light(id);
     selected = id;
     hovered = null;
@@ -476,7 +485,7 @@ async function main() {
     addMark(mark, parentChildCount) {
       if (tree.nodes.has(mark.id)) return;
       tree = withMark(tree, mark, parentChildCount);
-      scene.setTree(tree, { born: mark.id });
+      scene.setTree(shown(), { born: mark.id });
       updateFog();
       showPreview();
       timeline.treeChanged();
@@ -485,7 +494,7 @@ async function main() {
     addWeek(week, root) {
       const old = tree.nodes.get(tree.rootId);
       tree = withWeek(tree, week, root);
-      scene.setTree(tree, { week: root.id });
+      scene.setTree(shown(), { week: root.id });
       updateFog();
       showPreview();
       timeline.treeChanged();
@@ -518,10 +527,7 @@ async function main() {
 
   // A deep link is an arrival too.
   const firstLit = light(selected);
-  if (firstLit) {
-    lighting.delete(selected);
-    scene.refresh(tree);
-  }
+  if (firstLit) land(selected);
   showPreview();
   updateFog();
   announce.textContent = `${firstLit ? "New. " : ""}${describe(tree, selected)}`;
