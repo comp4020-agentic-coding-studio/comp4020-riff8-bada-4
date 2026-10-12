@@ -66,3 +66,12 @@ change first --- not the other way around.
   import map in `src/server.ts`. Anything else new needs the same
   justification.
 - `scripts/seed.ts` is for a scratch `DATA_DIR` only, never `/data`.
+- The `seen` table is per visitor and never exposed: no read receipts, and
+  nothing reveals whether or how many others have read a mark.
+- Presence and chat are in memory only (`src/presence.ts`), never written to
+  SQLite and never logged. They use ephemeral presence ids, never
+  `visitor_id`, over SSE with no dependency, and every POST is checked
+  against the visitor cookie that owns the presence id.
+- A live `mark` event carries only the fields `/archive.json` already
+  exposes, with `mine` and `seen` worked out per recipient, and is broadcast
+  only after a successful `store.post`.
