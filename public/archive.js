@@ -2,7 +2,20 @@
 // nested list (the no-JS and screen-reader view) in place when it can't. Keys,
 // the D-pad, the preview card, announcements and deep links live here; the
 // scene itself is archive-scene.js, loaded only once WebGL is known to work.
-import { buildTree, describe, edgeMessage, move, replies } from "./archive-tree.js";
+import {
+  buildTree,
+  completeWeeks,
+  describe,
+  edgeMessage,
+  frontier,
+  isLit,
+  move,
+  replies,
+  totalProgress,
+  weekComplete,
+  weekProgress,
+  withSeen,
+} from "./archive-tree.js";
 import * as sound from "./archive-sound.js";
 
 /** @typedef {import("./archive-tree.js").Move} Move */
@@ -136,7 +149,12 @@ async function main() {
   legend.append(dl);
   if (window.matchMedia("(min-width: 641px)").matches) legend.open = true;
 
-  hud.append(legend, switches, preview, dpad);
+  const progress = el("p", { class: "progress" });
+  const pWeek = el("span", { class: "progress-week" });
+  const pAll = el("span", { class: "progress-all" });
+  progress.append(pWeek, pAll);
+
+  hud.append(legend, switches, progress, preview, dpad);
   list.before(toggle);
   // Inside <main>, so every control sits in a landmark; the HUD is fixed-position.
   archive.append(hud, announce);
@@ -159,6 +177,11 @@ async function main() {
           ? "This week. Everything posted on the home page hangs here until 00:00 Monday."
           : "A sealed week. Nothing can be added to it now.";
       pMeta.textContent = n.childCount === 1 ? "1 mark" : `${n.childCount} marks`;
+    } else if (!isLit(n)) {
+      // A hovered ember shows who wrote it, not what they said.
+      pWho.textContent = n.name;
+      pBody.textContent = "Unexplored, fly here to read it.";
+      pMeta.textContent = `${timeFormat.format(new Date(n.createdAt))} · ${replies(n.childCount)}`;
     } else {
       pWho.textContent = n.mine ? `${n.name} (yours)` : n.name;
       pBody.textContent = n.body;
@@ -183,10 +206,72 @@ async function main() {
   });
   document.body.classList.remove("scene-loading");
   reduce.addEventListener("change", () => scene.setReducedMotion(reduce.matches));
-  scene.onArrive((id) => {
+  // What landing somewhere does: the scene plays the arrival, and a mark lit
+  // on the way lights up as you land, at full strength.
+  /** @type {Set<number>} marks lit in the logical tree but not yet in the scene */
+  const lighting = new Set();
+  /** @type {Map<number, number>} landing on this mark completes this week root */
+  const celebrations = new Map();
+  scene.onArrive((id, strength) => {
     const n = tree.nodes.get(id);
-    if (n) sound.tick(n.depth + (n.isRoot ? 0 : 1));
+    if (lighting.has(id)) {
+      lighting.delete(id);
+      scene.refresh(tree);
+      updateFog();
+    }
+    if (n && strength === "full") sound.chime();
+    else if (n) sound.tick(n.depth + (n.isRoot ? 0 : 1));
+    const root = celebrations.get(id);
+    if (root !== undefined) {
+      celebrations.delete(id);
+      scene.celebrate(root);
+      sound.arpeggio();
+      const label = tree.nodes.get(root)?.body ?? "This week";
+      later(() => (announce.textContent = `${label} complete: every mark lit.`), 1200);
+    }
   });
+
+  function updateFog() {
+    // The scene only learns a mark is lit when you land on it.
+    let shown = tree;
+    for (const id of lighting) {
+      const n = shown.nodes.get(id);
+      if (n) shown = { ...shown, nodes: new Map(shown.nodes).set(id, { ...n, seen: false }) };
+    }
+    scene.setFog({ frontier: frontier(shown), complete: completeWeeks(shown) });
+    const n = tree.nodes.get(selected);
+    if (n) {
+      const week = weekProgress(tree, n.weekId);
+      pWeek.textContent = `${n.label}: ${week.lit} / ${week.total} lit`;
+    }
+    const all = totalProgress(tree);
+    pAll.textContent = `${all.lit} / ${all.total} all time`;
+  }
+
+  /** @param {() => void} fn @param {number} ms */
+  function later(fn, ms) {
+    setTimeout(fn, ms);
+  }
+
+  /** Light a mark for this visitor: in memory now, on the server in the background. @param {number} id */
+  function light(id) {
+    const n = tree.nodes.get(id);
+    if (!n || isLit(n)) return false;
+    const wasComplete = weekComplete(tree, n.weekId);
+    tree = withSeen(tree, id);
+    lighting.add(id);
+    if (!wasComplete && weekComplete(tree, n.weekId)) {
+      const root = tree.weekRoots.find((r) => tree.nodes.get(r)?.weekId === n.weekId);
+      if (root !== undefined) celebrations.set(id, root);
+    }
+    fetch("/seen", {
+      method: "POST",
+      keepalive: true,
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ id: String(id) }),
+    }).catch(() => {});
+    return true;
+  }
   pauseBtn.addEventListener("click", () => {
     const on = pauseBtn.getAttribute("aria-pressed") !== "true";
     pauseBtn.setAttribute("aria-pressed", String(on));
@@ -202,13 +287,15 @@ async function main() {
   // A hook for checks and curious devtools users; holds no private data.
   Object.assign(window, { __archive: { stats: scene.stats, selected: () => selected } });
 
-  /** @param {number} id */
+  /** Arrive at a mark: by key, D-pad, click or deep link. @param {number} id */
   function select(id) {
+    const first = light(id);
     selected = id;
     hovered = null;
-    scene.select(id);
+    scene.select(id, { strength: first ? "full" : "small" });
     showPreview();
-    announce.textContent = describe(tree, id);
+    updateFog();
+    announce.textContent = `${first ? "New. " : ""}${describe(tree, id)}`;
     // Track position in the URL without a history entry per keypress.
     history.replaceState(null, "", `#m-${id}`);
   }
@@ -266,8 +353,15 @@ async function main() {
     }
   });
 
+  // A deep link is an arrival too.
+  const firstLit = light(selected);
+  if (firstLit) {
+    lighting.delete(selected);
+    scene.refresh(tree);
+  }
   showPreview();
-  announce.textContent = describe(tree, selected);
+  updateFog();
+  announce.textContent = `${firstLit ? "New. " : ""}${describe(tree, selected)}`;
 }
 
 main();

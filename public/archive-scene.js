@@ -9,7 +9,7 @@ import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
-import { orbitModel, pathBetween, positionAt, snippet } from "./archive-tree.js";
+import { isLit as nodeLit, orbitModel, pathBetween, positionAt, snippet } from "./archive-tree.js";
 
 /** @typedef {import("./archive-tree.js").Tree} Tree */
 /** @typedef {import("./archive-tree.js").OrbitModel} OrbitModel */
@@ -20,8 +20,8 @@ const COLOURS = {
   // Bodies sit just past 1 so the bloom pass catches them; rings sit below
   // its threshold, so they stay hairlines rather than floodlights.
   sun: new THREE.Color(1.6, 1.12, 0.45),
-  mark: new THREE.Color(0.35, 1.0, 1.25), // teal
-  mine: new THREE.Color(1.35, 0.45, 1.05), // rose: marks you left
+  mark: new THREE.Color(0.24, 0.8, 1.0), // teal
+  mine: new THREE.Color(1.1, 0.36, 0.85), // rose: marks you left
   ember: new THREE.Color(0.16, 0.13, 0.12),
   rim: new THREE.Color(0.55, 0.42, 0.3),
   ring: new THREE.Color(0.28, 0.55, 0.68),
@@ -107,7 +107,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
 
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.6, 0.5, 0.62);
+  const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.5, 0.4, 0.7);
   composer.addPass(bloom);
   composer.addPass(new OutputPass());
 
@@ -229,10 +229,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
   }
 
   /** Lit: a root, your own mark, or one you've explored. @param {number} id */
-  function isLit(id) {
-    const n = tree.nodes.get(id);
-    return Boolean(n && (n.isRoot || n.mine || n.seen !== false));
-  }
+  const isLit = (id) => nodeLit(tree.nodes.get(id));
 
   /** Label text and colours for a body, from the tree as it is now. @param {number} id */
   function restyle(id) {
@@ -258,8 +255,8 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
 
   // ---- selection marker, pulse, effects ------------------------------------------------
   const selRing = new THREE.Mesh(
-    new THREE.TorusGeometry(1, 0.04, 8, 64),
-    new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 2.2, 2.2), toneMapped: false }),
+    new THREE.TorusGeometry(1, 0.03, 8, 64),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(1.1, 1.1, 1.15), toneMapped: false }),
   );
   world.add(selRing);
   const pulse = new THREE.Sprite(
@@ -318,10 +315,12 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     armSpread.set([(Math.random() - 0.5) * 3.2 * wide, (Math.random() - 0.5) * 0.9 * wide, (Math.random() - 0.5) * 3.2 * wide], i * 3);
   }
   armGeometry.setAttribute("position", new THREE.BufferAttribute(armPos, 3));
+  const armCol = new Float32Array(ARM_PARTICLES * 3);
+  armGeometry.setAttribute("color", new THREE.BufferAttribute(armCol, 3));
   const armMaterial = new THREE.PointsMaterial({
     map: glow,
     size: 0.38,
-    color: COLOURS.arm,
+    vertexColors: true,
     transparent: true,
     opacity: 0.32,
     depthWrite: false,
@@ -480,7 +479,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     const b = model.bodies.get(id);
     if (!b) return 12;
     if (tree.nodes.get(id)?.isRoot) return Math.min(64, b.extent * 2.0 + 6);
-    return Math.min(40, Math.max(6, b.extent * 3 + 4.5));
+    return Math.min(40, Math.max(8, b.extent * 3.6 + 4));
   }
 
   function placeCamera(id) {
@@ -806,7 +805,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
       const haloMat = /** @type {THREE.SpriteMaterial} */ (b.halo.material);
       haloMat.color.copy(colour);
       const haloScale = isStar ? (weekIndex === 0 ? 7.5 : 5) : 3.2;
-      haloMat.opacity = isStar ? (weekIndex === 0 ? 0.6 + Math.sin(ts * 0.7) * 0.05 * (motion ? 1 : 0) : 0.45) : 0.26 * b.lit;
+      haloMat.opacity = isStar ? (weekIndex === 0 ? 0.6 + Math.sin(ts * 0.7) * 0.05 * (motion ? 1 : 0) : 0.45) : 0.16 * b.lit;
       b.halo.scale.setScalar(s * haloScale * (1 + b.flare));
       b.halo.position.copy(b.pos);
       b.halo.visible = b.mesh.visible && haloMat.opacity > 0.01;
@@ -868,7 +867,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     if (sel) {
       selRing.position.copy(sel.pos);
       selRing.quaternion.copy(camera.quaternion);
-      selRing.scale.setScalar(Math.max(0.16, sel.mesh.scale.x) * 1.9 * (motion ? 1 + Math.sin(ts * 3) * 0.05 : 1));
+      selRing.scale.setScalar(Math.max(0.12, sel.mesh.scale.x) * 1.45 * (motion ? 1 + Math.sin(ts * 3) * 0.05 : 1));
       selRing.visible = sel.mesh.visible;
     }
 
@@ -966,14 +965,24 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     if (armCurve) {
       const arr = /** @type {Float32Array} */ (armGeometry.attributes.position.array);
       const flow = motion ? (rewinding ? -0.0009 : 0.00035) : 0;
+      // the stretch of arm into a completed week glows brighter
+      const crowned = [...complete].map((id) => bodies.get(id)?.pos).filter(Boolean);
+      const col = /** @type {Float32Array} */ (armGeometry.attributes.color.array);
       for (let i = 0; i < ARM_PARTICLES; i++) {
         armU[i] = (armU[i] + flow + 1) % 1;
         armCurve.getPointAt(armU[i], tmp);
+        let boost = 0;
+        for (const c of crowned) boost = Math.max(boost, Math.exp(-(tmp.distanceToSquared(c) / 60)));
+        const k = 1 + boost * 2.2;
+        col[i * 3] = COLOURS.arm.r * k;
+        col[i * 3 + 1] = COLOURS.arm.g * k;
+        col[i * 3 + 2] = COLOURS.arm.b * k;
         arr[i * 3] = tmp.x + armSpread[i * 3];
         arr[i * 3 + 1] = tmp.y + armSpread[i * 3 + 1] + (motion ? Math.sin(ts * 0.5 + i) * 0.15 : 0);
         arr[i * 3 + 2] = tmp.z + armSpread[i * 3 + 2];
       }
       armGeometry.attributes.position.needsUpdate = true;
+      armGeometry.attributes.color.needsUpdate = true;
     }
 
     controls.target.add(extra);
@@ -1046,10 +1055,25 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
         }
       }
     },
+    /** Swap in a tree with the same marks (one just lit): restyle only. @param {Tree} next */
+    refresh(next) {
+      tree = next;
+      for (const id of tree.nodes.keys()) restyle(id);
+    },
     /** Frontier embers flicker; complete weeks wear a crown. */
     setFog({ frontier: f, complete: c }) {
       frontier = f;
       complete = c;
+    },
+    /** A week fully lit: a bigger burst and a double shockwave from its star. @param {number} rootId */
+    celebrate(rootId) {
+      const b = bodies.get(rootId);
+      if (!b || !motion) return;
+      const size = disp.get(rootId)?.size ?? 1;
+      shockwave(rootId, size, COLOURS.crown, 0.8);
+      setTimeout(() => shockwave(rootId, size, COLOURS.crown, 0.9), 160);
+      burst(b.pos, COLOURS.crown, 140, 9, 1.1);
+      b.flare = 1;
     },
     /** @param {(id: number, strength: Strength) => void} fn called on every arrival */
     onArrive(fn) {

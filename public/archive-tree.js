@@ -12,7 +12,7 @@
 /**
  * @typedef {{ id: number, parentId: number | null, weekId: number, isRoot: boolean,
  *   name: string, body: string, createdAt: string, childCount: number,
- *   children: number[], mine: boolean }} ArchiveMark
+ *   children: number[], mine: boolean, seen?: boolean }} ArchiveMark
  * @typedef {{ id: number, weekStart: string, label: string, rootMarkId: number,
  *   prevWeekId: number | null, archived: boolean }} ArchiveWeek
  * @typedef {{ currentWeekId: number, weeks: ArchiveWeek[], marks: ArchiveMark[] }} ArchiveData
@@ -152,6 +152,7 @@ export function describe(tree, id) {
     const count = n.childCount === 1 ? "1 mark" : `${n.childCount} marks`;
     return `${n.label}, ${state}, ${count}. Down arrow to read it, Enter to open.`;
   }
+  if (!isLit(n)) return `${n.label}, unexplored mark by ${n.name}, ${replies(n.childCount)}. Select it to read it.`;
   return `${n.label}, mark by ${n.name}: “${snippet(n.body, 90)}”, ${replies(n.childCount)}, Enter to open.`;
 }
 
@@ -229,16 +230,16 @@ function kidsAt(tree, id, at) {
 /** Size of a body from its depth and how many replies hang under it. @param {number} depth @param {number} desc */
 function bodySize(depth, desc) {
   if (depth === 0) return STAR_SIZE;
-  const base = depth === 1 ? 0.36 : 0.12 * 0.66 ** (depth - 2);
+  const base = depth === 1 ? 0.27 : 0.1 * 0.68 ** (depth - 2);
   return base * Math.min(depth === 1 ? 2.1 : 1.6, 1 + 0.3 * Math.sqrt(desc));
 }
 
 /** Orbit radius from how long ago a conversation was last active (log scale). @param {number} depth @param {number} ago */
 function ageRadius(depth, ago) {
-  const k = depth === 1 ? 1.25 : 0.12 * 0.6 ** (depth - 2);
+  const k = depth === 1 ? 1.25 : 0.16 * 0.55 ** (depth - 2);
   return k * Math.log10(1 + Math.max(0, ago) / MINUTE);
 }
-const GAP = (/** @type {number} */ depth) => (depth === 1 ? 0.45 : 0.055 * 0.7 ** (depth - 2));
+const GAP = (/** @type {number} */ depth) => (depth === 1 ? 0.45 : 0.2 * 0.55 ** (depth - 2));
 
 /**
  * One week system laid out at a moment: every body's radius, size, extent
@@ -469,5 +470,79 @@ export function withMark(tree, mark, parentChildCount) {
     archived: parent.archived,
     t: Date.parse(mark.createdAt),
   });
+  return { ...tree, nodes };
+}
+
+// ---- fog of war ------------------------------------------------------------------
+// A mark is lit for you once you've arrived at it (or opened its page), or if
+// you wrote it. Week roots are always lit: they're the landmarks.
+
+/** @param {TreeNode | undefined} n */
+export function isLit(n) {
+  return Boolean(n && (n.isRoot || n.mine || n.seen));
+}
+
+/**
+ * How much of a week you've lit.
+ * @param {Tree} tree @param {number} weekId @returns {{ lit: number, total: number }}
+ */
+export function weekProgress(tree, weekId) {
+  let lit = 0;
+  let total = 0;
+  for (const n of tree.nodes.values()) {
+    if (n.isRoot || n.weekId !== weekId) continue;
+    total++;
+    if (isLit(n)) lit++;
+  }
+  return { lit, total };
+}
+
+/** Everything you've lit, all time. @param {Tree} tree */
+export function totalProgress(tree) {
+  let lit = 0;
+  let total = 0;
+  for (const n of tree.nodes.values()) {
+    if (n.isRoot) continue;
+    total++;
+    if (isLit(n)) lit++;
+  }
+  return { lit, total };
+}
+
+/** A week with marks in it, every one lit. An empty week isn't complete. @param {Tree} tree @param {number} weekId */
+export function weekComplete(tree, weekId) {
+  const p = weekProgress(tree, weekId);
+  return p.total > 0 && p.lit === p.total;
+}
+
+/** Week roots whose week is complete. @param {Tree} tree @returns {Set<number>} */
+export function completeWeeks(tree) {
+  const out = new Set();
+  for (const id of tree.weekRoots) {
+    const root = tree.nodes.get(id);
+    if (root && weekComplete(tree, root.weekId)) out.add(id);
+  }
+  return out;
+}
+
+/** The frontier: unlit marks whose parent is lit, the hint of where to go next. @param {Tree} tree */
+export function frontier(tree) {
+  const out = new Set();
+  for (const n of tree.nodes.values()) {
+    if (isLit(n) || n.parentId === null) continue;
+    if (isLit(tree.nodes.get(n.parentId))) out.add(n.id);
+  }
+  return out;
+}
+
+/**
+ * The tree with one mark lit, as a new tree (the same tree if it already was).
+ * @param {Tree} tree @param {number} id @returns {Tree}
+ */
+export function withSeen(tree, id) {
+  const n = tree.nodes.get(id);
+  if (!n || isLit(n)) return tree;
+  const nodes = new Map(tree.nodes);
+  nodes.set(id, { ...n, seen: true });
   return { ...tree, nodes };
 }

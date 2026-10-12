@@ -5,8 +5,14 @@ import {
   edgeMessage,
   move,
   orbitModel,
+  completeWeeks,
+  frontier,
   pathBetween,
   positionAt,
+  totalProgress,
+  weekComplete,
+  weekProgress,
+  withSeen,
   sealTime,
   withMark,
 } from "../public/archive-tree.js";
@@ -45,6 +51,7 @@ const mark = (id: number, parentId: number | null, weekId: number, children: num
   childCount: children.filter((c) => c % 10 !== 0).length,
   children,
   mine: false,
+  seen: true,
 });
 const data = {
   currentWeekId: 3,
@@ -230,4 +237,48 @@ it("walks siblings in orbit order: ← outward to quieter, → inward to livelie
   // ↓ is the outermost moon, never last week's star
   expect(move(tree, 30, "down", order)).toBe(32);
   expect(move(tree, 31, "down", order)).toBe(33);
+});
+
+// Fog of war: the same tree, with week 2 mostly unexplored.
+const foggy = buildTree({
+  ...data,
+  marks: data.marks.map((m) => ({ ...m, seen: m.isRoot || [21, 33].includes(m.id), mine: m.id === 22 })),
+});
+
+it("counts lit marks per week and all time, roots excluded", () => {
+  // week 2: 21 seen, 22 mine, 23 and 24 dark
+  expect(weekProgress(foggy, 2)).toEqual({ lit: 2, total: 4 });
+  expect(weekProgress(foggy, 3)).toEqual({ lit: 1, total: 3 });
+  expect(totalProgress(foggy)).toEqual({ lit: 3, total: 8 });
+});
+
+it("finds the frontier: unlit marks whose parent is lit", () => {
+  // 23 hangs off 21 (seen); 24 hangs off 23 (dark); 31/32 off this week's root
+  expect([...frontier(foggy)].sort()).toEqual([11, 23, 31, 32]);
+});
+
+it("lights a mark as a new tree, and completes a week when the last one lights", () => {
+  expect(weekComplete(foggy, 2)).toBe(false);
+  let t = withSeen(foggy, 23);
+  expect(foggy.nodes.get(23)!.seen).toBe(false);
+  expect(t.nodes.get(23)!.seen).toBe(true);
+  expect(frontier(t).has(24)).toBe(true);
+  expect(weekComplete(t, 2)).toBe(false);
+  t = withSeen(t, 24);
+  expect(weekComplete(t, 2)).toBe(true);
+  expect(completeWeeks(t)).toEqual(new Set([20]));
+  expect(withSeen(t, 24)).toBe(t); // already lit: unchanged
+});
+
+it("never calls an empty week complete", () => {
+  const empty = buildTree({
+    currentWeekId: 3,
+    weeks: [data.weeks[0]],
+    marks: [{ ...mark(30, null, 3, [], true), childCount: 0 }],
+  });
+  expect(weekComplete(empty, 3)).toBe(false);
+});
+
+it("announces an unexplored mark without its text", () => {
+  expect(describe(foggy, 23)).toBe("Week 2, unexplored mark by n23, 1 reply. Select it to read it.");
 });
