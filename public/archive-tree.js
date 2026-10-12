@@ -165,11 +165,17 @@ export function edgeMessage(tree, id, move) {
     case "down":
       return n?.isRoot ? "Nobody left a mark this week." : "No moons: nobody has replied to this mark.";
     case "left":
-      return n?.isRoot && id !== tree.rootId
-        ? "Already the outermost orbit. Press [ for the week before this one."
-        : "Already the outermost orbit.";
-    case "right":
-      return "Already the innermost orbit: the liveliest conversation here.";
+    case "right": {
+      if (n?.isRoot && id === tree.rootId) return "This is this week's star. Down arrow to its planets, [ for last week.";
+      if (n?.isRoot && move === "left") return "Already the outermost orbit. Press [ for the week before this one.";
+      if (n?.isRoot) return "Nothing further in. Down arrow to this week's planets.";
+      const parent = n?.parentId === null || n?.parentId === undefined ? undefined : tree.nodes.get(n.parentId);
+      const body = parent?.isRoot ? "planet" : "moon";
+      const around = parent?.isRoot ? "" : ` round ${parent?.name}'s mark. Up arrow goes back to it`;
+      return move === "left"
+        ? `Already the outermost ${body}${around || ", and this is the oldest week"}.`
+        : `Already the innermost ${body}: the liveliest conversation here${around}.`;
+    }
     case "older":
       return "This is the oldest week.";
     case "newer":
@@ -668,10 +674,12 @@ export function nearestExisting(tree, id, t) {
 // silence ever takes more than a beat.
 export const REPLAY_RATE = 0.2 / 3_600_000; // playback s per history ms: 0.2 s an hour
 export const REPLAY_MAX_GAP = 0.45; // s: the longest any quiet stretch takes
+export const REPLAY_BEAT = 0.16; // s: the least between two marks, so each visibly sprouts
 
 /** Playback seconds for a gap in history (ms): linear, then capped. @param {number} gap */
 export function replayGap(gap) {
-  return Math.min(Math.max(0, gap) * REPLAY_RATE, REPLAY_MAX_GAP);
+  if (gap <= 0) return 0;
+  return Math.max(REPLAY_BEAT, Math.min(gap * REPLAY_RATE, REPLAY_MAX_GAP));
 }
 
 /**

@@ -140,6 +140,8 @@ it("announces the selection and explains the edges", () => {
   expect(describe(tree, 30)).toBe("Week 3, this week, 2 marks. Down arrow to read it, Enter to open.");
   expect(edgeMessage(tree, 30, "up")).toMatch(/top/);
   expect(edgeMessage(tree, 20, "left")).toMatch(/\[/);
+  expect(edgeMessage(tree, 30, "right")).toMatch(/this week's star/);
+  expect(edgeMessage(tree, 33, "left")).toBe("Already the outermost moon round n31's mark. Up arrow goes back to it.");
 });
 
 const NOW = Date.parse("2026-10-07T01:00:00.000Z");
@@ -366,12 +368,16 @@ it("falls back to the nearest ancestor that existed", () => {
 it("compresses quiet stretches in the replay clock", () => {
   expect(replayGap(3 * 86_400_000)).toBe(REPLAY_MAX_GAP);
   expect(replayGap(10 * 60_000)).toBeLessThan(REPLAY_MAX_GAP);
-  expect(replayGap(20 * 60_000)).toBeCloseTo(replayGap(10 * 60_000) * 2);
+  expect(replayGap(2 * 3_600_000)).toBeCloseTo(replayGap(3_600_000) * 2);
+  // two marks a second apart still each get a visible beat; simultaneous ones share it
+  expect(replayGap(1000)).toBeGreaterThan(0.1);
+  expect(replayGap(0)).toBe(0);
   const from = T(ROOT_TIMES[30]);
   const to = T("2026-10-11T12:00:00.000Z");
   const s = replaySchedule(tree, from, to);
   const total = s.at(-1)!.play;
   expect(total).toBeLessThan(10);
+  expect(total).toBeGreaterThan(1);
   expect(historyAt(s, 0)).toBe(from);
   expect(historyAt(s, total)).toBe(to);
   expect(historyAt(s, total + 5)).toBe(to);

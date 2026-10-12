@@ -93,6 +93,7 @@ export function startTogether(app) {
     const list = [...people.values()];
     hereList.replaceChildren();
     hereEmpty.hidden = list.length > 0;
+    here.classList.toggle("is-empty", list.length === 0);
     const nm = names();
     for (const p of list) {
       const li = el("li");
@@ -197,6 +198,16 @@ export function startTogether(app) {
     }
   });
 
+  /** Bumping into someone: their wisp flares, a soft chime, the chat panel glows. @param {string[]} ids */
+  function bump(ids) {
+    if (hidden || ids.length === 0) return;
+    for (const id of ids) app.scene.flareWisp(id);
+    sound.wave();
+    chat.classList.remove("met");
+    void chat.offsetWidth;
+    chat.classList.add("met");
+  }
+
   // ---- events ------------------------------------------------------------------------
   /** @param {any} event */
   function onEvent(event) {
@@ -277,7 +288,10 @@ export function startTogether(app) {
     // presence changed: tell the scene, announce comings and goings at your mark
     if (event.type !== "hello") {
       const { arrived, left } = roomChanges(before, people, mine);
-      for (const id of arrived) app.announce(`${nameOf(id)} is here with you.`);
+      for (const id of arrived) {
+        app.announce(`${nameOf(id)} is here with you.`);
+        bump([id]);
+      }
       for (const id of left) if (people.has(id)) app.announce(`${nameOf(id)} moved on.`);
     }
     app.scene.setPeople(people, names());
@@ -328,10 +342,16 @@ export function startTogether(app) {
   });
 
   renderHere();
+  let lastAt = app.selected();
 
   return {
     /** Your selection changed (by any means). */
     moved() {
+      const at = app.selected();
+      if (at !== lastAt) {
+        lastAt = at;
+        bump(peopleAt(people, at).map((p) => p.id));
+      }
       sendMove();
       renderChat();
       renderHere();

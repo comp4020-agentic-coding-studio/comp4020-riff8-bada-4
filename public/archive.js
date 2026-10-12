@@ -184,7 +184,8 @@ async function main() {
     dl.append(el("dt", {}, k), el("dd", {}, v));
   }
   legend.append(dl);
-  if (window.matchMedia("(min-width: 641px)").matches) legend.open = true;
+  // Closed by default: open, it covers the sky's labels. The stage's own
+  // label names the keys for screen readers.
 
   const progress = el("p", { class: "progress" });
   const pWeek = el("span", { class: "progress-week" });
@@ -361,7 +362,9 @@ async function main() {
     if (on) sound.tick(1);
   });
   // A hook for checks and curious devtools users; holds no private data.
-  Object.assign(window, { __archive: { stats: scene.stats, selected: () => selected } });
+  Object.assign(window, {
+    __archive: { stats: scene.stats, selected: () => selected, screenOf: scene.screenOf, positionAt: scene.positionAt },
+  });
 
   /**
    * Arrive at a mark: by key, D-pad, click or deep link. Spectating (time

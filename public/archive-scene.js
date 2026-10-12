@@ -145,10 +145,13 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
   // ---- the orbit model, and what the scene is easing toward ------------------------
   // In live mode "now" is the wall clock, nudged past the newest mark so a
   // server clock slightly ahead of ours never hides a fresh arrival.
+  // It's also quantised to the 30 s refresh, so every client builds the same
+  // model at the same moment: the shared sky holds for radii, not just phase.
   const newestT = () => Math.max(...[...tree.nodes.values()].map((n) => n.t));
-  const liveNow = () => Math.max(Date.now(), newestT());
+  const bucket = () => Math.floor(Date.now() / REFRESH_MS);
+  const liveNow = () => Math.max(bucket() * REFRESH_MS, newestT());
   let model = orbitModel(tree, liveNow());
-  let modelAt = performance.now();
+  let modelBucket = bucket();
 
   /**
    * Per body: displayed radius easing toward the model's, with an optional
@@ -429,7 +432,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
   /** @param {number} now @param {{ dur?: number, spiral?: Set<number> }} [opts] */
   function rebuild(now, opts) {
     model = orbitModel(tree, now);
-    modelAt = performance.now();
+    modelBucket = bucket();
     applyModel(opts);
   }
   applyModel();
@@ -744,7 +747,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     }
 
     // Recompute the orbit model every ~30 s, so cooling threads drift out.
-    if (motion && !timeTravel && performance.now() - modelAt > REFRESH_MS) rebuild(liveNow(), { dur: 6 });
+    if (motion && !timeTravel && bucket() !== modelBucket) rebuild(liveNow(), { dur: 6 });
 
     // Ease radii, anchors and growth toward the model.
     for (const [id, d] of disp) {
@@ -1245,10 +1248,11 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
   // ---- the time line: a thread through the marks in posting order -------------------
   const THREAD_SEG = 10;
   let threadCap = 0;
+  const THREAD_COLOUR = new THREE.Color(0.95, 0.55, 1.25);
   const threadMaterial = new THREE.LineBasicMaterial({
-    color: new THREE.Color(0.95, 0.55, 1.25),
+    vertexColors: true,
     transparent: true,
-    opacity: 0.55,
+    opacity: 0.8,
     blending: THREE.AdditiveBlending,
     depthWrite: false,
     toneMapped: false,
@@ -1292,7 +1296,8 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
 
   /** A gentle arc from a to b, lifted so the thread reads as its own layer. */
   function arcPoint(a, b, u, out) {
-    const lift = a.distanceTo(b) * 0.18 + 0.15;
+    // long hops between weeks get a low arc, so they don't sweep the screen
+    const lift = Math.min(a.distanceTo(b) * 0.18, 2.2) + 0.15;
     out.copy(a).lerp(b, u);
     out.y += Math.sin(Math.PI * u) * lift;
     return out;
@@ -1311,6 +1316,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
       thread.geometry.dispose();
       thread.geometry = new THREE.BufferGeometry();
       thread.geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(threadCap * 3), 3));
+      thread.geometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(threadCap * 3), 3));
     }
     const arr = /** @type {Float32Array} */ (thread.geometry.attributes.position.array);
     const pts = threadIds.map((id) => posOf(id));
@@ -1336,8 +1342,18 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
         n++;
       }
     }
+    // The recent stretch glows; older hops fade back, so the head reads.
+    const col = /** @type {Float32Array} */ (thread.geometry.attributes.color.array);
+    for (let i = 0; i < n; i++) {
+      const hops = (n - 1 - i) / THREAD_SEG;
+      const k = Math.max(0.16, Math.exp(-hops / 5));
+      col[i * 3] = THREAD_COLOUR.r * k;
+      col[i * 3 + 1] = THREAD_COLOUR.g * k;
+      col[i * 3 + 2] = THREAD_COLOUR.b * k;
+    }
     thread.geometry.setDrawRange(0, n);
     thread.geometry.attributes.position.needsUpdate = true;
+    thread.geometry.attributes.color.needsUpdate = true;
     // The comet rides the head, a short fading tail behind it.
     const head = new THREE.Vector3(arr[(n - 1) * 3], arr[(n - 1) * 3 + 1], arr[(n - 1) * 3 + 2]);
     comet.position.copy(head);
