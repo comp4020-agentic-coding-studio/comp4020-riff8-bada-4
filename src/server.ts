@@ -10,6 +10,7 @@ import {
   crumbs,
   escapeHtml,
   formatTime,
+  hasVisibleContent,
   MAX_BODY,
   MAX_NAME,
   page,
@@ -51,13 +52,6 @@ const CONTENT_TYPES: Record<string, string> = {
   ".js": "text/javascript; charset=utf-8",
   ".css": "text/css; charset=utf-8",
 };
-
-// `.trim()` only strips whitespace (Unicode `Zs`), not zero-width/format
-// characters (`Cf`, e.g. U+200B) — a string made of nothing else survives
-// `.trim()` non-empty and reads as blank on the wall.
-function hasVisibleContent(s: string): boolean {
-  return /[^\s\p{Cf}]/u.test(s);
-}
 
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
@@ -146,7 +140,7 @@ ${wall(kids, visitorId, archived ? "No replies, and now there never will be." : 
   );
 }
 
-function archivePage(now: Date): string {
+function archivePage(visitorId: string, now: Date): string {
   const current = store.currentWeek(now);
   const byParent = new Map<number, MarkWithCount[]>();
   for (const m of store.allMarks()) {
@@ -168,7 +162,7 @@ function archivePage(now: Date): string {
 <p class="muted" id="archive-intro">Every week of marks, newest first. Each week seals at 00:00 Monday, Sydney time.</p>
 <section id="list-view" aria-labelledby="list-heading">
 <h2 id="list-heading">The whole tree</h2>
-${archiveList(store.weeks(), byParent, current.id)}
+${archiveList(store.weeks(), byParent, current.id, visitorId, store.seenIds(visitorId))}
 </section>
 </main>`,
     {
@@ -184,7 +178,7 @@ ${archiveList(store.weeks(), byParent, current.id)}
 // The whole tree in one response, presented as children arrays. A week root's
 // parent is the next newer week's root and its leftmost child is the previous
 // week's root; childCount counts only real replies. Never includes visitor_id:
-// `mine` is worked out here, per request.
+// `mine` and `seen` are worked out here, per request.
 function archiveJson(visitorId: string, now: Date): unknown {
   const current = store.currentWeek(now);
   const weeks = store.weeks();
@@ -195,6 +189,7 @@ function archiveJson(visitorId: string, now: Date): unknown {
     if (prev) newerRoot.set(prev.root_mark_id, w.root_mark_id);
   }
   const marks = store.allMarks();
+  const seen = store.seenIds(visitorId);
   const children = new Map<number, number[]>();
   for (const w of weeks) {
     const prev = weeks.find((p) => p.id === w.prev_week_id);
@@ -216,19 +211,61 @@ function archiveJson(visitorId: string, now: Date): unknown {
       prevWeekId: w.prev_week_id,
       archived: w.id !== current.id,
     })),
-    marks: marks.map((m) => ({
-      id: m.id,
-      parentId: m.is_root ? (newerRoot.get(m.id) ?? null) : m.parent_id,
-      weekId: m.week_id,
-      isRoot: m.is_root === 1,
-      name: m.name,
-      body: m.body,
-      createdAt: m.created_at,
-      childCount: m.child_count,
-      children: children.get(m.id) ?? [],
-      mine: !m.is_root && m.visitor_id === visitorId,
-    })),
+    marks: marks.map((m) => {
+      const mine = !m.is_root && m.visitor_id === visitorId;
+      return {
+        id: m.id,
+        parentId: m.is_root ? (newerRoot.get(m.id) ?? null) : m.parent_id,
+        weekId: m.week_id,
+        isRoot: m.is_root === 1,
+        name: m.name,
+        body: m.body,
+        createdAt: m.created_at,
+        childCount: m.child_count,
+        children: children.get(m.id) ?? [],
+        mine,
+        seen: m.is_root === 1 || mine || seen.has(m.id),
+      };
+    }),
   };
+}
+
+// A POST the browser says came from another site is refused outright. A
+// missing header (curl, an old browser) is let through: the cookie is
+// SameSite=Lax, so a cross-site form post wouldn't carry it anyway.
+function crossSite(req: IncomingMessage): boolean {
+  const site = req.headers["sec-fetch-site"];
+  return site !== undefined && site !== "same-origin";
+}
+
+// A small form body, or undefined if it's over the request size limit.
+async function readForm(req: IncomingMessage): Promise<URLSearchParams | undefined> {
+  try {
+    return new URLSearchParams(await readBody(req));
+  } catch {
+    return undefined;
+  }
+}
+
+function sendStatus(res: ServerResponse, status: number): void {
+  res.writeHead(status, { "Cache-Control": "no-store" });
+  res.end();
+}
+
+// A positive integer id from a form field, or undefined.
+function formId(value: string | null): number | undefined {
+  return value !== null && /^\d{1,15}$/.test(value) ? Number(value) : undefined;
+}
+
+async function handleSeen(req: IncomingMessage, res: ServerResponse, visitorId: string, now: Date): Promise<void> {
+  if (crossSite(req)) return sendStatus(res, 403);
+  const form = await readForm(req);
+  if (!form) return sendStatus(res, 413);
+  const id = formId(form.get("id"));
+  if (id === undefined) return sendStatus(res, 400);
+  if (!store.getMark(id)) return sendStatus(res, 404);
+  store.markSeen(visitorId, id, now);
+  sendStatus(res, 204);
 }
 
 async function serveStatic(pathname: string, res: ServerResponse): Promise<boolean> {
@@ -322,14 +359,18 @@ const server = createServer((req, res) => {
             res.end();
             return;
           }
-          return sendHtml(res, 200, markPage(mark, visitorId, lastName, now));
+          const html = markPage(mark, visitorId, lastName, now);
+          if (!mark.is_root) store.markSeen(visitorId, mark.id, now);
+          return sendHtml(res, 200, html);
         }
         return notFound(res);
       }
 
       if (req.method === "GET" && url.pathname === "/archive/") {
-        return sendHtml(res, 200, archivePage(now));
+        return sendHtml(res, 200, archivePage(visitorId, now));
       }
+
+      if (req.method === "POST" && url.pathname === "/seen") return await handleSeen(req, res, visitorId, now);
       if (req.method === "GET" && url.pathname === "/archive") {
         res.writeHead(301, { Location: "/archive/" });
         res.end();

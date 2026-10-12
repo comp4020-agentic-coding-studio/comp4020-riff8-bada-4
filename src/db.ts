@@ -53,7 +53,14 @@ function transaction<T>(db: DatabaseSync, fn: () => T): T {
   }
 }
 
-export function openStore(file: string) {
+export interface StoreOptions {
+  // Called after the transaction that created a new week's root commits, i.e.
+  // when a request is the first one past 00:00 Monday. Never for the boot
+  // backfill, which only ever fills in the past.
+  onNewWeek?: (week: WeekRow) => void;
+}
+
+export function openStore(file: string, opts: StoreOptions = {}) {
   const db = new DatabaseSync(file);
 
   // The original crit-8 table, unchanged, so an existing volume opens as-is;
@@ -80,6 +87,12 @@ export function openStore(file: string) {
     );
     create index if not exists marks_parent on marks(parent_id);
     create index if not exists marks_week on marks(week_id);
+    create table if not exists seen (
+      visitor_id text not null,
+      mark_id integer not null references marks(id),
+      seen_at text not null,
+      primary key (visitor_id, mark_id)
+    );
   `);
 
   const stmt = {
@@ -104,6 +117,8 @@ export function openStore(file: string) {
     children: db.prepare(
       "select m.*, (select count(*) from marks c where c.parent_id = m.id) as child_count from marks m where m.parent_id = ? order by m.id",
     ),
+    markSeen: db.prepare("insert or ignore into seen (visitor_id, mark_id, seen_at) values (?, ?, ?)"),
+    seenIds: db.prepare("select mark_id from seen where visitor_id = ?"),
     all: db.prepare(
       "select m.*, (select count(*) from marks c where c.parent_id = m.id) as child_count from marks m order by m.id",
     ),
@@ -111,10 +126,10 @@ export function openStore(file: string) {
 
   // Creates the week's root if it doesn't exist and splices it into the chain
   // after whichever week actually came before (weeks nobody visited get no
-  // root). Must run inside a transaction.
-  function ensureWeekIn(start: string, startsAt: Date): WeekRow {
+  // root). Must run inside a transaction. `created` says whether it was new.
+  function ensureWeekIn(start: string, startsAt: Date): { week: WeekRow; created: boolean } {
     const existing = stmt.weekByStart.get(start) as WeekRow | undefined;
-    if (existing) return existing;
+    if (existing) return { week: existing, created: false };
     const prev = stmt.weekBefore.get(start) as WeekRow | undefined;
     const next = stmt.weekAfter.get(start) as WeekRow | undefined;
     const root = stmt.insertMark.run(
@@ -132,7 +147,7 @@ export function openStore(file: string) {
     stmt.setMarkWeek.run(weekId, rootId);
     // Only the backfill can land a week mid-chain; keep the chain unbroken.
     if (next) stmt.relinkWeek.run(weekId, next.id);
-    return stmt.weekById.get(weekId) as unknown as WeekRow;
+    return { week: stmt.weekById.get(weekId) as unknown as WeekRow, created: true };
   }
 
   // Lazy rollover: there's no cron (the machine sleeps when idle), so every
@@ -143,7 +158,9 @@ export function openStore(file: string) {
     const { start, startsAt } = weekOf(now);
     const existing = stmt.weekByStart.get(start) as WeekRow | undefined;
     if (existing) return existing;
-    return transaction(db, () => ensureWeekIn(start, startsAt));
+    const { week, created } = transaction(db, () => ensureWeekIn(start, startsAt));
+    if (created) opts.onNewWeek?.(week);
+    return week;
   }
 
   // Backfill: hang every pre-tree mark under the root of the week it was
@@ -151,7 +168,7 @@ export function openStore(file: string) {
   transaction(db, () => {
     for (const mark of stmt.orphans.all() as unknown as Mark[]) {
       const { start, startsAt } = weekOf(new Date(mark.created_at));
-      const week = ensureWeekIn(start, startsAt);
+      const { week } = ensureWeekIn(start, startsAt);
       stmt.adopt.run(week.root_mark_id, week.id, mark.id);
     }
   });
@@ -211,7 +228,17 @@ export function openStore(file: string) {
     return stmt.all.all() as unknown as MarkWithCount[];
   }
 
-  return { currentWeek, getMark, getWeek, isArchived, children, ancestors, post, weeks, allMarks, close: () => db.close() };
+  // Seen-state is private to its visitor: nothing reads it except for them.
+  function markSeen(visitorId: string, markId: number, now: Date): void {
+    stmt.markSeen.run(visitorId, markId, now.toISOString());
+  }
+
+  function seenIds(visitorId: string): Set<number> {
+    const rows = stmt.seenIds.all(visitorId) as { mark_id: number }[];
+    return new Set(rows.map((r) => r.mark_id));
+  }
+
+  return { currentWeek, getMark, markSeen, seenIds, getWeek, isArchived, children, ancestors, post, weeks, allMarks, close: () => db.close() };
 }
 
 export type Store = ReturnType<typeof openStore>;

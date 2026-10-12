@@ -26,6 +26,13 @@ export function formatTime(iso: string): string {
 export const MAX_NAME = 40;
 export const MAX_BODY = 280;
 
+// `.trim()` only strips whitespace (Unicode `Zs`), not zero-width/format
+// characters (`Cf`, e.g. U+200B) — a string made of nothing else survives
+// `.trim()` non-empty and reads as blank on the wall.
+export function hasVisibleContent(s: string): boolean {
+  return /[^\s\p{Cf}]/u.test(s);
+}
+
 export interface PageOptions {
   nav?: "home" | "archive";
   head?: string;
@@ -89,6 +96,7 @@ export function page(title: string, body: string, opts: PageOptions = {}): strin
     padding: 0 0.5em;
     margin-left: 0.25em;
   }
+  .new { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
   .empty { color: color-mix(in srgb, currentColor 65%, transparent); }
   .notice {
     padding: 0.75rem 1rem;
@@ -167,19 +175,25 @@ export function snippet(s: string, max: number): string {
 
 // The no-JS archive and the screen-reader view: every week newest first, each
 // a <details>, every mark a link to its page. Ids match the scene's deep links
-// (#m-<id>), and browsers open a closed <details> to reach a fragment.
+// (#m-<id>), and browsers open a closed <details> to reach a fragment. Marks
+// this visitor hasn't seen (not theirs, no seen row) carry a "new" marker, the
+// list's version of the scene's fog.
 export function archiveList(
   weeks: WeekRow[],
   byParent: Map<number, MarkWithCount[]>,
   currentWeekId: number,
+  visitorId: string,
+  seen: Set<number>,
 ): string {
   const branch = (parentId: number): string => {
     const kids = byParent.get(parentId) ?? [];
     if (kids.length === 0) return "";
-    const items = kids.map(
-      (m) =>
-        `<li id="m-${m.id}"><a href="/m/${m.id}">${escapeHtml(m.name)}: ${escapeHtml(snippet(m.body, 80))}</a> <span class="muted">${replyCount(m.child_count)}</span>${branch(m.id)}</li>`,
-    );
+    const items = kids.map((m) => {
+      const fresh = m.visitor_id !== visitorId && !seen.has(m.id);
+      return `<li id="m-${m.id}"><a href="/m/${m.id}">${escapeHtml(m.name)}: ${escapeHtml(snippet(m.body, 80))}</a>${
+        fresh ? ' <span class="new">new</span>' : ""
+      } <span class="muted">${replyCount(m.child_count)}</span>${branch(m.id)}</li>`;
+    });
     return `<ul>${items.join("")}</ul>`;
   };
   return weeks

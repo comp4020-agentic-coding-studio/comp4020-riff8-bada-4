@@ -35,6 +35,8 @@ interface ArchiveMark {
   childCount: number;
   children: number[];
   mine: boolean;
+  seen: boolean;
+  isRoot: boolean;
 }
 
 interface Archive {
@@ -43,8 +45,8 @@ interface Archive {
   marks: ArchiveMark[];
 }
 
-async function archive(): Promise<Archive> {
-  const res = await fetch(new URL("/archive.json", baseUrl));
+async function archive(cookie?: string): Promise<Archive> {
+  const res = await fetch(new URL("/archive.json", baseUrl), { headers: cookie ? { Cookie: cookie } : {} });
   expect(res.status).toBe(200);
   return (await res.json()) as Archive;
 }
@@ -216,4 +218,88 @@ it("serves three.js and the client modules with JavaScript content types", async
   }
   // an encoded slash survives URL parsing, so this really asks for ../
   expect((await fetch(new URL(app.replace("archive.js", "..%2fpackage.json"), baseUrl))).status).toBe(404);
+});
+
+// ---- Fog of war: per-visitor seen-state -------------------------------------
+
+const visitorCookie = (): string => `visitor=${randomUUID()}`;
+
+function form(path: string, fields: Record<string, string>, headers: Record<string, string> = {}): Promise<Response> {
+  return fetch(new URL(path, baseUrl), {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", ...headers },
+    body: new URLSearchParams(fields).toString(),
+    redirect: "manual",
+  });
+}
+
+it("every mark in /archive.json has a boolean seen, and still no visitor_id", async () => {
+  const cookie = visitorCookie();
+  const res = await fetch(new URL("/archive.json", baseUrl), { headers: { Cookie: cookie } });
+  const raw = await res.text();
+  expect(raw).not.toContain("visitor_id");
+  expect(raw).not.toContain(cookie.slice("visitor=".length));
+  for (const m of (JSON.parse(raw) as Archive).marks) expect(typeof m.seen).toBe("boolean");
+});
+
+it("roots and your own marks are seen with no visit; others' aren't", async () => {
+  const author = visitorCookie();
+  const marker = `own-${randomUUID()}`;
+  await post("/", "Own", marker, author);
+  const mine = (await archive(author)).marks;
+  expect(mine.find((m) => m.body === marker)?.seen).toBe(true);
+  for (const root of mine.filter((m) => m.isRoot)) expect(root.seen).toBe(true);
+  expect((await archive(visitorCookie())).marks.find((m) => m.body === marker)?.seen).toBe(false);
+});
+
+it("GET /m/<id> marks it seen for that cookie only", async () => {
+  const marker = `visit-${randomUUID()}`;
+  await post("/", "Visited", marker);
+  const { id } = await findMark(marker);
+  const reader = visitorCookie();
+  const res = await fetch(new URL(`/m/${id}`, baseUrl), { headers: { Cookie: reader } });
+  expect(res.status).toBe(200);
+  expect((await archive(reader)).marks.find((m) => m.id === id)?.seen).toBe(true);
+  expect((await archive(visitorCookie())).marks.find((m) => m.id === id)?.seen).toBe(false);
+});
+
+it("POST /seen stores and answers 204; bad ids are 4xx; cross-site is 403", async () => {
+  const marker = `seen-${randomUUID()}`;
+  await post("/", "Seen", marker);
+  const { id } = await findMark(marker);
+  const reader = visitorCookie();
+
+  const cross = await form("/seen", { id: String(id) }, { Cookie: reader, "Sec-Fetch-Site": "cross-site" });
+  expect(cross.status).toBe(403);
+  expect((await archive(reader)).marks.find((m) => m.id === id)?.seen).toBe(false);
+
+  for (const bad of ["999999999", "abc", "-1", "1.5", ""]) {
+    const res = await form("/seen", { id: bad }, { Cookie: reader });
+    expect(res.status, `id=${bad}`).toBeGreaterThanOrEqual(400);
+    expect(res.status, `id=${bad}`).toBeLessThan(500);
+  }
+
+  const ok = await form("/seen", { id: String(id) }, { Cookie: reader, "Sec-Fetch-Site": "same-origin" });
+  expect(ok.status).toBe(204);
+  expect((await archive(reader)).marks.find((m) => m.id === id)?.seen).toBe(true);
+  // idempotent
+  expect((await form("/seen", { id: String(id) }, { Cookie: reader })).status).toBe(204);
+});
+
+it("the no-JS archive list marks unseen marks new, and not seen ones", async () => {
+  const unseenBody = `fog-${randomUUID()}`;
+  const seenBody = `lit-${randomUUID()}`;
+  await post("/", "Fog", unseenBody);
+  await post("/", "Lit", seenBody);
+  const unseen = await findMark(unseenBody);
+  const seen = await findMark(seenBody);
+  const reader = visitorCookie();
+  await form("/seen", { id: String(seen.id) }, { Cookie: reader });
+
+  const res = await fetch(new URL("/archive/", baseUrl), { headers: { Cookie: reader } });
+  const doc = new JSDOM(await res.text()).window.document;
+  expect(doc.querySelector(`#m-${unseen.id} > .new`)?.textContent).toBe("new");
+  expect(doc.querySelector(`#m-${seen.id} > .new`)).toBeNull();
+  // still readable: the link text is untouched
+  expect(doc.querySelector(`#m-${unseen.id} > a`)?.textContent).toContain(unseenBody);
 });
