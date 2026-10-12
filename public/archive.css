@@ -64,8 +64,6 @@ body.scene-loading .stage::after {
   place-items: center;
   color: #aab4c8;
 }
-.stage.bump { animation: bump 0.25s; }
-@keyframes bump { 50% { transform: translateX(-4px); } }
 .stage.cut { animation: cut 0.18s ease-out; }
 @keyframes cut { from { opacity: 0.4; } }
 
@@ -95,10 +93,31 @@ body.scene-loading .stage::after {
 .bubble-root { max-width: 13rem; border-color: rgb(255 200 110 / 0.5); }
 .bubble-root .bubble-who { color: #ffd98a; font-size: 0.8rem; }
 .bubble-mine { border-color: rgb(240 140 210 / 0.55); }
+.bubble-compact { padding: 0.15rem 0.45rem; }
+.bubble-compact .bubble-what { display: none; }
+.bubble-ember { border-color: rgb(140 120 100 / 0.3); background: rgb(10 12 20 / 0.6); }
+.bubble-ember .bubble-who { color: #9a8f86; font-weight: 500; }
+.bubble-ember .bubble-what:empty { display: none; }
 .bubble.is-selected { background: rgb(22 36 62 / 0.92); border-color: #fff; box-shadow: 0 0 1.2rem rgb(160 220 255 / 0.35); }
 
 body.scene-on .hud { display: block; }
 .hud > * { position: fixed; z-index: 3; }
+
+.switches {
+  top: 0.6rem;
+  right: 7.6rem;
+  display: flex;
+  gap: 0.4rem;
+}
+.switch {
+  font-size: 0.8rem;
+  padding: 0.35rem 0.7rem;
+  color: #e8ecf4;
+  background: rgb(20 28 46 / 0.85);
+  border: 1px solid rgb(159 216 255 / 0.35);
+  border-radius: 0.4rem;
+}
+.switch[aria-pressed="true"] { background: rgb(60 90 130 / 0.9); border-color: #9fd8ff; }
 
 .preview {
   left: 1rem;
@@ -165,13 +184,29 @@ body.scene-on :focus-visible { outline: 2px solid #9fd8ff; outline-offset: 2px; 
 @media (max-width: 640px) {
   body.scene-on #archive-intro { display: none; }
   body.scene-on #archive > h1 { font-size: 1.1rem; }
-  .preview { bottom: calc(8.75rem + 1.5rem); max-height: 26vh; font-size: 0.9rem; right: 1rem; width: auto; }
+  .switches {
+  top: 0.6rem;
+  right: 7.6rem;
+  display: flex;
+  gap: 0.4rem;
+}
+.switch {
+  font-size: 0.8rem;
+  padding: 0.35rem 0.7rem;
+  color: #e8ecf4;
+  background: rgb(20 28 46 / 0.85);
+  border: 1px solid rgb(159 216 255 / 0.35);
+  border-radius: 0.4rem;
+}
+.switch[aria-pressed="true"] { background: rgb(60 90 130 / 0.9); border-color: #9fd8ff; }
+
+.preview { bottom: calc(8.75rem + 1.5rem); max-height: 26vh; font-size: 0.9rem; right: 1rem; width: auto; }
   .dpad { right: 50%; transform: translateX(50%); }
   .bubble { max-width: 8.5rem; font-size: 0.66rem; }
   .bubble-root { max-width: 9.5rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .stage.bump, .stage.cut { animation: none; }
+  .stage.cut { animation: none; }
   .bubble { transition: none; }
 }

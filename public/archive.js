@@ -3,6 +3,7 @@
 // the D-pad, the preview card, announcements and deep links live here; the
 // scene itself is archive-scene.js, loaded only once WebGL is known to work.
 import { buildTree, describe, edgeMessage, move, replies } from "./archive-tree.js";
+import * as sound from "./archive-sound.js";
 
 /** @typedef {import("./archive-tree.js").Move} Move */
 
@@ -91,6 +92,10 @@ async function main() {
   });
   const hud = el("div", { class: "hud" });
   const toggle = el("button", { type: "button", class: "view-toggle", "aria-pressed": "false" }, "List view");
+  const switches = el("div", { class: "switches", role: "group", "aria-label": "Sky settings" });
+  const pauseBtn = el("button", { type: "button", class: "switch", "aria-pressed": "false" }, "Pause orbits");
+  const soundBtn = el("button", { type: "button", class: "switch", "aria-pressed": "false" }, "Sound");
+  switches.append(pauseBtn, soundBtn);
   const announce = el("p", { class: "sr-only", "aria-live": "polite" });
 
   const preview = el("section", { class: "preview", "aria-label": "Selected mark" });
@@ -103,11 +108,11 @@ async function main() {
   const dpad = el("div", { class: "dpad", role: "group", "aria-label": "Move through the tree" });
   /** @type {[Move, string, string][]} */
   const pads = [
-    ["up", "↑", "Parent"],
-    ["left", "←", "Earlier sibling"],
+    ["up", "↑", "What this orbits"],
+    ["left", "←", "One orbit out (quieter)"],
     ["home", "⌂", "This week"],
-    ["right", "→", "Later sibling"],
-    ["down", "↓", "First reply"],
+    ["right", "→", "One orbit in (livelier)"],
+    ["down", "↓", "Outermost moon"],
   ];
   for (const [m, glyph, label] of pads) {
     const b = el("button", { type: "button", class: `pad pad-${m}`, "aria-label": label, title: label }, glyph);
@@ -119,9 +124,9 @@ async function main() {
   legend.append(el("summary", {}, "Keys"));
   const dl = el("dl");
   for (const [k, v] of [
-    ["↑ / Esc", "parent (from a week: the newer week)"],
-    ["↓", "first reply"],
-    ["← →", "siblings; left of a week's first mark is last week"],
+    ["↑ / Esc", "what this orbits (from a week: the newer week)"],
+    ["↓", "its outermost moon"],
+    ["← →", "one orbit out (quieter) / in (livelier); out past the last planet is last week"],
     ["[ ]", "older / newer week"],
     ["Enter", "open"],
     ["Home", "back to this week"],
@@ -131,7 +136,7 @@ async function main() {
   legend.append(dl);
   if (window.matchMedia("(min-width: 641px)").matches) legend.open = true;
 
-  hud.append(legend, preview, dpad);
+  hud.append(legend, switches, preview, dpad);
   list.before(toggle);
   // Inside <main>, so every control sits in a landmark; the HUD is fixed-position.
   archive.append(hud, announce);
@@ -178,6 +183,22 @@ async function main() {
   });
   document.body.classList.remove("scene-loading");
   reduce.addEventListener("change", () => scene.setReducedMotion(reduce.matches));
+  scene.onArrive((id) => {
+    const n = tree.nodes.get(id);
+    if (n) sound.tick(n.depth + (n.isRoot ? 0 : 1));
+  });
+  pauseBtn.addEventListener("click", () => {
+    const on = pauseBtn.getAttribute("aria-pressed") !== "true";
+    pauseBtn.setAttribute("aria-pressed", String(on));
+    scene.setPaused(on);
+    announce.textContent = on ? "Orbits paused." : "Orbits moving.";
+  });
+  soundBtn.addEventListener("click", () => {
+    const on = soundBtn.getAttribute("aria-pressed") !== "true";
+    soundBtn.setAttribute("aria-pressed", String(on));
+    sound.setSound(on);
+    if (on) sound.tick(1);
+  });
   // A hook for checks and curious devtools users; holds no private data.
   Object.assign(window, { __archive: { stats: scene.stats, selected: () => selected } });
 
@@ -199,8 +220,10 @@ async function main() {
 
   /** @param {Move} m */
   function go(m) {
-    const next = move(tree, selected, m);
+    const next = move(tree, selected, m, scene.order());
     if (next === null) {
+      sound.thud();
+      scene.bump(m);
       // Re-set even if unchanged, so a repeated edge still gets announced.
       announce.textContent = "";
       requestAnimationFrame(() => (announce.textContent = edgeMessage(tree, selected, m)));

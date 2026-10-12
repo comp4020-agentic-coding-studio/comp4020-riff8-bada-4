@@ -96,5 +96,30 @@ for (let w = WEEKS; w >= 0; w--) {
   }
 }
 
+// This week gets conversations of every age, so the sky's orbits visibly
+// differ: threads started days ago, some gone quiet and some replied to
+// minutes ago, and one posted just now.
+{
+  const week = store.currentWeek(new Date(now));
+  const start = Date.parse(store.getMark(week.root_mark_id)!.created_at);
+  const span = now - start;
+  const ages = [0.92, 0.75, 0.5, 0.3, 0.12].map((f) => now - span * f);
+  const threads: number[] = [];
+  for (const at of ages) {
+    const res = store.post("seed", pick(NAMES), pick(OPENERS), null, new Date(at));
+    if (!res.ok) throw new Error(`seed post failed: ${res.reason}`);
+    threads.push(res.id);
+    marks++;
+  }
+  // an old thread brought back to life a few minutes ago, with a moon of a moon
+  const revived = store.post("seed", pick(NAMES), pick(REPLIES), threads[0], new Date(now - 6 * 60_000));
+  if (revived.ok) store.post("seed", pick(NAMES), pick(REPLIES), revived.id, new Date(now - 2 * 60_000));
+  // one replied to an hour ago, one a day ago
+  store.post("seed", pick(NAMES), pick(REPLIES), threads[1], new Date(now - 60 * 60_000));
+  store.post("seed", pick(NAMES), pick(REPLIES), threads[2], new Date(Math.max(Date.parse(new Date(ages[2]).toISOString()) + 60_000, now - DAY)));
+  store.post("seed", pick(NAMES), "Just now: is anyone else in the archive?", null, new Date(now - 30_000));
+  marks++;
+}
+
 console.log(`seeded ${store.weeks().length} weeks, ${store.allMarks().length} rows (${marks} top-level marks) into ${dataDir}`);
 store.close();
