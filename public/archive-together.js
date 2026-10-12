@@ -146,11 +146,6 @@ export function startTogether(app) {
     const mine = app.selected();
     const others = peopleAt(people, mine);
     const open = !hidden && others.length > 0;
-    if (chatMark !== mine) {
-      // a different room: its history comes from the server's `room`
-      lines = [];
-      chatMark = mine;
-    }
     if (!open) {
       if (!chat.hidden && chat.contains(document.activeElement)) app.stage.focus();
       chat.hidden = true;
@@ -170,7 +165,8 @@ export function startTogether(app) {
       chatMutes.append(b);
     }
     chatLog.replaceChildren();
-    for (const line of lines) {
+    // lines belong to the room the server last placed you in
+    for (const line of chatMark === mine ? lines : []) {
       if (muted.has(line.id)) continue;
       const li = el("li");
       li.style.setProperty("--wisp", line.colour);
@@ -254,6 +250,10 @@ export function startTogether(app) {
         return;
       case "say": {
         if (event.markId !== mine) return;
+        if (chatMark !== mine) {
+          lines = [];
+          chatMark = mine;
+        }
         lines = [...lines, event.line].slice(-20);
         const own = event.line.id === live.presenceId();
         if (!muted.has(event.line.id)) {
@@ -323,6 +323,12 @@ export function startTogether(app) {
     const key = `${app.selected()}:${app.timeTravelling() ? 1 : 0}`;
     if (key === lastSent) return;
     lastSent = key;
+    // a real change of room: the old room's lines go, and the server sends
+    // the new room's history if it has any
+    if (chatMark !== app.selected()) {
+      lines = [];
+      chatMark = app.selected();
+    }
     lastMoveAt = performance.now();
     void live.post("move", { mark: String(app.selected()), tt: app.timeTravelling() ? "1" : "0" });
   }

@@ -231,7 +231,8 @@ async function main() {
     // The reply form belongs to the selection, and never vanishes mid-typing.
     const sel = tree.nodes.get(selected);
     const typing = reply.contains(document.activeElement);
-    const open = Boolean(sel && sel.weekIndex === 0 && !sel.archived);
+    // no replying from the past: time travel is spectating
+    const open = Boolean(sel && sel.weekIndex === 0 && !sel.archived && !timeline.active());
     if (!typing) {
       reply.hidden = !open || (hovered !== null && hovered !== selected);
       rBodyLabel.textContent = sel?.isRoot ? "Leave a mark on this week" : `Reply to ${sel?.name ?? "this"}`;
@@ -283,7 +284,11 @@ async function main() {
     onChip: (personId) => together.flyTo(personId),
   });
   document.body.classList.remove("scene-loading");
-  reduce.addEventListener("change", () => scene.setReducedMotion(reduce.matches));
+  reduce.addEventListener("change", () => {
+    scene.setReducedMotion(reduce.matches);
+    // a flight cancelled by the switch never lands; light what it was flying to
+    for (const pending of [...lighting]) land(pending);
+  });
   // What landing somewhere does: the scene plays the arrival, and a mark lit
   // on the way lights up as you land, at full strength.
   /** @type {Set<number>} marks lit in the logical tree but not yet in the scene */
@@ -380,12 +385,19 @@ async function main() {
    * @param {number} id @param {{ spectate?: boolean, quiet?: boolean }} [opts]
    */
   function select(id, { spectate = false, quiet = false } = {}) {
+    // In time travel nothing can be selected that didn't exist yet (a peer
+    // ahead of you, a deep link, your own new reply): its nearest ancestor
+    // that did stands in, which is where its wisp waits too.
+    if (timeline.active() && !existsAt(tree, id, timeline.time())) id = nearestExisting(tree, id, timeline.time());
     // a flight cut short by this one still lit what it was flying to
     for (const pending of [...lighting]) if (pending !== id) land(pending);
+    const same = id === selected;
     const first = !spectate && light(id);
-    selected = id;
     hovered = null;
+    selected = id;
     scene.select(id, { strength: first ? "full" : spectate ? "none" : "small" });
+    // already there (spectating it, say): no flight will land, so light it now
+    if (first && same && lighting.has(id)) land(id);
     showPreview();
     updateFog();
     if (!quiet) announce.textContent = `${first ? "New. " : ""}${describe(tree, id, scene.order())}`;
@@ -521,6 +533,7 @@ async function main() {
     changed: () => {
       timeBtn.setAttribute("aria-pressed", String(timeline.active()));
       together.moved();
+      showPreview();
     },
     reducedMotion: () => reduce.matches,
   });

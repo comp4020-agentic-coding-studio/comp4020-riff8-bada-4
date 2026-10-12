@@ -115,6 +115,7 @@ export function startTimeline(app) {
    */
   function setTime(t, { announceMove = true } = {}) {
     time = Math.min(end(), Math.max(start(), t));
+    range.max = String(end());
     app.scene.setTime(time);
     app.scene.setThread(postingOrder(tree()).filter((id) => existsAt(tree(), id, time)));
     range.value = String(time);
@@ -177,6 +178,9 @@ export function startTimeline(app) {
   }
 
   // ---- playback ----------------------------------------------------------------------
+  // Each play() gets its own loop id, so a pause and resume inside one frame
+  // never leaves two loops running.
+  let loop = 0;
   function play() {
     if (!active) enter(start());
     if (time >= end() - 60_000) setTime(start());
@@ -187,23 +191,27 @@ export function startTimeline(app) {
     playBtn.setAttribute("aria-pressed", "true");
     playBtn.textContent = "Pause";
     rewinding(false);
-    requestAnimationFrame(tick);
+    const id = ++loop;
+    requestAnimationFrame(() => tick(id));
   }
 
   function stop() {
     playing = false;
+    caughtUp = false;
+    loop++;
     playBtn.setAttribute("aria-pressed", "false");
     playBtn.textContent = "Play";
   }
 
   let lastLive = 0;
-  function tick() {
-    if (!playing || !active) return;
+  /** @param {number} id */
+  function tick(id) {
+    if (!playing || !active || id !== loop) return;
     const before = time;
     let next;
     if (caughtUp) {
       // caught up: keep riding now, so live marks sprout as they land
-      if (performance.now() - lastLive < 1000) return void requestAnimationFrame(tick);
+      if (performance.now() - lastLive < 1000) return void requestAnimationFrame(() => tick(id));
       lastLive = performance.now();
       next = Date.now();
     } else {
@@ -228,7 +236,7 @@ export function startTimeline(app) {
         if (follow) app.select(born[born.length - 1], { spectate: true });
       }
     }
-    requestAnimationFrame(tick);
+    requestAnimationFrame(() => tick(id));
   }
 
   /** Crossing a seal is the drama: the week that ended flashes and locks. @param {number} s */
@@ -304,7 +312,7 @@ export function startTimeline(app) {
     treeChanged() {
       if (!active) return;
       renderTrack();
-      if (caughtUp) setTime(Date.now(), { announceMove: false });
+      if (playing && caughtUp) setTime(Date.now(), { announceMove: false });
     },
   };
 }
