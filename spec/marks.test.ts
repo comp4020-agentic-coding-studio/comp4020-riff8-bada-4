@@ -700,3 +700,89 @@ it("chat makes no marks, and once the room empties a newcomer gets no history", 
   expect(a.of("room")).toEqual([]);
   expect(d.raw()).not.toContain("this will vanish");
 });
+
+// ---- Live walls on the home and mark pages ----------------------------------
+
+// Loads a served page in jsdom and runs the served live-wall.js against a
+// stand-in EventSource that the test feeds real /live events into.
+async function liveWallPage(path: string, cookie: string) {
+  const page = await (await fetch(new URL(path, baseUrl), { headers: { Cookie: cookie } })).text();
+  const dom = new JSDOM(page, { url: new URL(path, baseUrl).href, runScripts: "outside-only", pretendToBeVisual: true });
+  const src = dom.window.document.querySelector('script[src$="/live-wall.js"]')?.getAttribute("src");
+  expect(src, `${path} doesn't load live-wall.js`).toBeTruthy();
+  const sources: { url: string; onmessage?: (e: { data: string }) => void; closed: boolean }[] = [];
+  class FakeEventSource {
+    static CLOSED = 2;
+    url: string;
+    readyState = 1;
+    closed = false;
+    onmessage?: (e: { data: string }) => void;
+    constructor(url: string) {
+      this.url = url;
+      sources.push(this);
+    }
+    close() {
+      this.closed = true;
+    }
+  }
+  Object.assign(dom.window, { EventSource: FakeEventSource });
+  dom.window.eval(await (await fetch(new URL(src!, baseUrl))).text());
+  expect(sources.map((s) => s.url)).toEqual(["/live"]);
+  return {
+    doc: dom.window.document,
+    feed: (event: LiveEvent) => sources[0].onmessage?.({ data: JSON.stringify(event) }),
+  };
+}
+
+// The same mark as two pieces of markup, compared without layout whitespace
+// or the highlight class.
+const normalisedItem = (li: Element | null | undefined) =>
+  li?.outerHTML.replace(/>\s*\n\s*</g, "><").replace(" live-new", "").replace(/&#39;/g, "'");
+
+it("the home wall grows live, with exactly the markup the server renders", async () => {
+  const cookie = visitorCookie();
+  const home = await liveWallPage("/", cookie);
+  const { currentWeekId, weeks } = await archive();
+  expect(home.doc.querySelector("main")?.dataset.wall).toBe(String(weeks.find((w) => w.id === currentWeekId)!.rootMarkId));
+
+  const stream = await openLive(cookie);
+  const body = `wall-${randomUUID()}`;
+  await post("/", "Walt", body, cookie);
+  home.feed(await stream.waitFor((e) => e.type === "mark" && e.mark.body === body));
+  const live = home.doc.querySelector("ol.marks > li");
+  expect(live?.querySelector(".mark-body")?.textContent).toBe(body);
+  expect(live?.classList.contains("mine")).toBe(true);
+
+  const fresh = new JSDOM(await (await fetch(new URL("/", baseUrl), { headers: { Cookie: cookie } })).text());
+  const served = fresh.window.document.querySelector("ol.marks > li");
+  expect(normalisedItem(live)).toBe(normalisedItem(served));
+
+  // a reply elsewhere updates that mark's count on this wall
+  const { id } = await findMark(body);
+  await post(`/m/${id}`, "Rae", `wall-reply-${randomUUID()}`);
+  home.feed(await stream.waitFor((e) => e.type === "mark" && e.mark.parentId === id));
+  expect(home.doc.querySelector(`ol.marks a[href="/m/${id}"]`)?.textContent).toBe("1 reply");
+  // and a reply to it never lands on the home wall itself
+  expect(home.doc.querySelectorAll("ol.marks > li")).toHaveLength(fresh.window.document.querySelectorAll("ol.marks > li").length);
+});
+
+it("an empty mark-page wall becomes a list, and the mark's own count updates", async () => {
+  const parent = await freshMark("empty-wall");
+  const cookie = visitorCookie();
+  const page = await liveWallPage(`/m/${parent}`, cookie);
+  expect(page.doc.querySelector("main > p.empty")).not.toBeNull();
+
+  const stream = await openLive(cookie);
+  const body = `first-reply-${randomUUID()}`;
+  await post(`/m/${parent}`, "Ola", body);
+  page.feed(await stream.waitFor((e) => e.type === "mark" && e.mark.body === body));
+  expect(page.doc.querySelector("main > p.empty")).toBeNull();
+  const li = page.doc.querySelector("main > ol.marks > li.mark");
+  expect(li?.querySelector(".mark-body")?.textContent).toBe(body);
+  expect(li?.classList.contains("mine")).toBe(false);
+  expect(li?.querySelector(".badge")).toBeNull();
+  expect(page.doc.querySelector(".focus-mark .reply-count")?.textContent).toBe("1 reply");
+  // marks under other parents are ignored
+  page.feed({ type: "mark", mark: { id: 1, parentId: -1, body: "elsewhere" }, parentChildCount: 1 });
+  expect(page.doc.querySelectorAll("main > ol.marks > li")).toHaveLength(1);
+});

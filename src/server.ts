@@ -56,6 +56,8 @@ const PUBLIC_HASH = (() => {
 })();
 const STATIC = `/static/${PUBLIC_HASH}/`;
 const IMMUTABLE = "public, max-age=31536000, immutable";
+// New marks appear on a live wall (main[data-wall]) without a reload.
+const LIVE_WALL = `<script type="module" src="${STATIC}live-wall.js"></script>`;
 const STATIC_ROOTS: [prefix: string, dir: string][] = [
   [`/vendor/three@${THREE_VERSION}/addons/`, "node_modules/three/examples/jsm"],
   [`/vendor/three@${THREE_VERSION}/`, "node_modules/three/build"],
@@ -105,12 +107,12 @@ function homePage(visitorId: string, lastName: string, now: Date): string {
   <h1>Marks</h1>
   <p>${escapeHtml(weekLabel(week.week_start))}. Leave a short mark; at 00:00 Monday it's sealed into the <a href="/archive/">archive</a>, for good.</p>
 </header>
-<main>
+<main data-wall="${week.root_mark_id}">
 ${postForm("/", lastName, "Leave it", "Your mark")}
 <h2 class="muted">This week</h2>
 ${wall(marks, visitorId, "No marks yet this week. Be the first.")}
 </main>`,
-    { nav: "home" },
+    { nav: "home", head: LIVE_WALL },
   );
 }
 
@@ -135,14 +137,14 @@ function markPage(mark: MarkWithCount, visitorId: string, lastName: string, now:
   <p class="mark-body">${escapeHtml(mark.body)}</p>
   <p class="mark-meta"><time datetime="${escapeHtml(mark.created_at)}">${formatTime(mark.created_at)}</time>${
     mine ? ' <span class="badge">yours</span>' : ""
-  } · ${replyCount(mark.child_count)}</p>
+  } · <span class="reply-count">${replyCount(mark.child_count)}</span></p>
 </div>`;
   }
   const title = mark.is_root ? `${mark.body} · Marks` : `${mark.name}: ${mark.body.slice(0, 40)} · Marks`;
   return page(
     title,
     `${crumbs(store.ancestors(mark))}
-<main>
+<main${archived ? "" : ` data-wall="${mark.id}"`}>
 ${heading}
 ${extra}
 <p><a href="/archive/#m-${mark.id}">Find in archive</a></p>
@@ -150,6 +152,8 @@ ${archived ? sealedNotice(mark.week_id) : postForm(`/m/${mark.id}`, lastName, "R
 <h2 class="muted">${mark.is_root ? "Marks" : "Replies"}</h2>
 ${wall(kids, visitorId, archived ? "No replies, and now there never will be." : "No replies yet.")}
 </main>`,
+    // a sealed wall can't grow, so it doesn't hold a stream open
+    archived ? {} : { head: LIVE_WALL },
   );
 }
 
