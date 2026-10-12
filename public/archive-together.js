@@ -377,6 +377,8 @@ export function startTogether(app) {
       });
     },
     next,
+    /** An off-screen chip: fly to that person. @param {string} id */
+    flyTo,
     /** A mark you just posted: fly to it once its live event lands. @param {number} id */
     expectOwn(id) {
       if (tree().nodes.has(id)) app.select(id);

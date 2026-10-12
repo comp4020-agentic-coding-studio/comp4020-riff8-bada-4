@@ -280,6 +280,7 @@ async function main() {
       showPreview();
     },
     onOpen: (id) => open(id),
+    onChip: (personId) => together.flyTo(personId),
   });
   document.body.classList.remove("scene-loading");
   reduce.addEventListener("change", () => scene.setReducedMotion(reduce.matches));
