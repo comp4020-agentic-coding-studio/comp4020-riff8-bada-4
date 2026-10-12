@@ -1,4 +1,4 @@
-# The archive becomes a game: flight that feels good, and a tree you light up by exploring it
+# The archive becomes a game: a solar system of conversations you explore, light up, rewind and share
 
 You're picking up Marks where the crit-8 riff left it: a weekly tree of marks,
 server-rendered, `node:sqlite` on the Fly volume, no build step, and an
@@ -10,9 +10,14 @@ pointer input), `public/archive.js` (keys, D-pad, HUD, announcements) and
 `spec/archive-tree.test.ts`).
 
 This run turns the archive from a diagram you can move around into
-**something that plays like a small exploration game**. It has four parts
-that feed each other:
+**something that plays like a small exploration game**. First it gets a new
+sky, and then four parts that feed each other:
 
+0. **A solar system.** The staircase tree becomes a sky. Each week is a star
+   system: marks are planets orbiting their week's star, and replies are
+   moons. **How close a conversation orbits is set by how recent it is.** The
+   liveliest threads circle nearest the star, quiet ones drift outward, and
+   a fresh reply pulls a planet back in.
 1. **Game feel.** Moving through the tree should feel responsive and
    physical, and arriving somewhere should feel like an event.
 2. **Fog of war.** Marks you haven't explored are dark embers. Flying to one
@@ -28,6 +33,119 @@ that feed each other:
 
 Nobody is around to answer questions. Where this prompt leaves something
 open, make the call and explain it in the commit message.
+
+## Part 0: the archive becomes a solar system (build this first)
+
+The tree data, its parent pointers, the server and `/archive.json` don't
+change. What changes is how the tree is drawn. Today `layout()` in
+`archive-tree.js` places nodes on a static staircase. Replace it with a sky
+that moves.
+
+- **Each week is a star system.** A week's root is its star. The current
+  week sits at the centre of the scene: a bright gold sun with a corona the
+  bloom pass catches. Its top-level marks are **planets** orbiting it. Replies
+  are **moons** orbiting their mark, and replies to replies are moons of
+  moons, smaller and quicker. It works the same way at every depth.
+- **Orbit = how *now* the conversation is.** A body's distance from what it
+  orbits is set by the time of the **newest mark anywhere in its
+  conversation**: the mark itself plus all its descendants. The liveliest
+  conversation orbits closest, and threads that have gone quiet sit further
+  out. Use a log scale, so a minute, an hour, a day and a week ago are all
+  visibly different. Moons work the same around their planet. Then run a
+  spacing pass that pushes orbits apart, so no planet's moon system ever
+  overlaps a neighbour's; a busy thread with many moons takes a wider lane.
+  Size bodies by how big their conversation is (descendant count), clamped
+  so nothing dwarfs its star.
+- **It moves in real time.** Recompute the orbit model every ~30s and
+  whenever the tree changes. A body whose radius changed glides to its new
+  orbit, so a conversation cooling off is a slow outward drift. When a new
+  reply lands anywhere in a thread (live in Part 4, or your own "Reply
+  here"), that planet **spirals inward** to the innermost orbit over about
+  1.5s, and the planets it passes ease outward to make room. That's a
+  conversation coming back to life, so make it look like one.
+- **Sealed weeks are frozen at their seal.** For a past week, "now" is the
+  moment it sealed (the next Monday 00:00). Its system shows how alive each
+  conversation was when the week ended and never changes afterwards, which
+  matches the README's promise about sealed weeks. In time travel (Part 3),
+  "now" is the scrub time, so scrubbing shows planets migrating inward as
+  replies land and drifting out as threads go quiet.
+- **Older weeks recede along a spiral arm.** Past weeks' systems sit along a
+  slowly winding galactic arm that leads out from the centre and back into the
+  fog. Each one is a little smaller, and its star cools and dims with age
+  (gold to amber to deep red). Draw the arm as a faint luminous dust lane:
+  it's the old spine, and the existing particles drift along it into the
+  past. The arm itself stays still; only what's inside each system orbits.
+- **Orbit rings are the edges.** Draw each body's orbit as a faint ring
+  around its parent; it's the parent pointer made visible. No straight branch
+  lines. Tilt the orbital planes by a few degrees for depth, but a system must
+  still read as a system from the default camera, which looks down at about
+  30 to 40°.
+- **One shared sky.** Orbital phase comes from a hash of the mark id plus
+  the wall clock (`Date.now()`), not time since page load. So everyone looking
+  at the archive at the same moment sees the planets in the same places. That
+  matters for Part 4: the wisp at Ana's mark is where Ana's mark is on your
+  screen too.
+- **Readable while moving.** Periods follow Kepler's law, roughly ∝ r^1.5.
+  The innermost planets go round in about 60s and the outer ones in several
+  minutes. Moons go faster, but never a full turn faster than ~20s, so labels
+  stay readable. Orbits slow to a crawl while the pointer is over a body, so
+  it's easy to click, and the selected body's own little system slows while
+  you're on it. A HUD **"Pause orbits"** toggle (`aria-pressed`) freezes
+  everything. **With reduced motion, orbits are frozen:** positions come from
+  the same model with time stopped.
+- **The camera rides along.** Selecting a planet frames it and its moons,
+  then follows it round its orbit, the way the camera already follows the
+  swaying tree. Flights travel the hierarchical route from `pathBetween`,
+  out to the common ancestor and back in. Evaluate it against the bodies'
+  *live* positions every frame, so you land smoothly on something that's
+  moving. The pulse of light still runs ahead.
+- **Navigation in orbit terms.** The keys still walk the same tree:
+  - ↑ goes to what this body orbits
+  - ↓ goes to its outermost moon
+  - ← moves one orbit outward, to a quieter conversation
+  - → moves one orbit inward, to a livelier one
+  - past the outermost planet, ← carries on into last week's star, because
+    the past is further out
+
+  So sibling order in `move()` changes from posting order to orbit order,
+  quietest first. For marks without replies, that's the same order as
+  today. Update `move()`, its tests, `describe()` where it helps, and the
+  legend's wording. `[`, `]` and Home are unchanged. The previous week's
+  root stays the leftmost child of a week root, as now.
+- **A pure model, tested.** Put the model in `archive-tree.js` as pure
+  functions. One builds an orbit model from `(tree, now)`, giving each node a
+  radius, period, phase, tilt and size. The other is `positionAt(model, id,
+  t)`, which composes the parent's position with the node's own orbit.
+  Replace the "lays older weeks out to the left" test in
+  `spec/archive-tree.test.ts` with tests that:
+  - the most recently active sibling has the smallest radius
+  - a new reply moves its whole thread to the innermost orbit
+  - neighbouring systems never overlap
+  - a sealed week's model doesn't change as `now` advances
+  - the same `t` always gives the same positions (the shared sky)
+  - sibling order in `move()` follows orbit order
+
+**Reading the later parts in this sky.** Parts 1 to 4 were written with the
+old tree in mind. Translate them like this:
+
+- "edge" or "branch" → the orbit ring. For flights and wisps, it means the
+  hierarchical route between live positions. Part 1's "hitting an edge"
+  still means a move that goes nowhere.
+- "spine" → the galactic arm.
+- an edge "growing" → its orbit ring sweeping round from 0° to 360°, then the
+  body condensing on it. Time travel's ungrow is that in reverse.
+- "branches carry the light" → rings of lit bodies glow, and rings around
+  unexplored ones stay faint. An unseen body (an "ember") is a dark rock with
+  only a thin rim catching starlight. Lighting it up is dawn breaking across
+  it.
+- a week's "crown" → a golden ring around its star, and the "brighter spine
+  segment" is that stretch of arm brightening.
+- "siblings glide aside" (Part 4) → orbits re-ranking: the replied-to planet
+  spirals inward and the others ease outward.
+- the seal animation (Parts 3 and 4) → a new sun ignites at the centre, and
+  the old system slides out along the arm as its star cools.
+- the time-travel thread → a line joining bodies in posting order, redrawn
+  every frame as they move. The comet rides it.
 
 ## Part 1: game feel (mostly `archive-scene.js` and `archive.js`)
 
@@ -366,12 +484,13 @@ and it appears on the home page and mark pages too, without a reload.
   The rule says rollover happens on request and never on a timer, so an
   archive left open over Monday 00:00 updates on the next request anyone
   makes. Position posts are frequent, so that's soon.
-- **In the archive, a new branch grows in.** Add the node to the in-memory
-  tree and re-run `layout()`. A new reply widens its week, so siblings can
-  shift. Every node whose position changed **glides** to its new spot over
-  about 0.6s, and its edges bend with it. Never jump. The new edge then grows
-  out from its parent and the bubble blooms, reusing the load-time growth
-  animation. If it's someone else's mark, it arrives as an ember (Part 2),
+- **In the archive, a new body is born.** Add the node to the in-memory
+  tree and rebuild the orbit model (Part 0). The new mark is the newest thing
+  in its conversation, so it takes the innermost orbit around its parent. Its
+  orbit ring sweeps round, then it condenses on it. Every ancestor's thread
+  just became the liveliest too, so each spirals inward in its own system
+  while its neighbours ease outward. Nothing ever jumps. If it's someone
+  else's mark, it arrives as an ember (Part 2),
   with a soft sprout sound if sound is on. The frontier flicker and the HUD's
   lit/total update. The current week can lose a "complete" crown this way;
   let it fade off gracefully. If the camera's selected node moves, the camera
@@ -473,7 +592,13 @@ Keep `spec/invariants.test.ts` green and every existing spec passing.
 This is mostly a feel change, so tests aren't enough. Run the app against a
 scratch `DATA_DIR` seeded with `scripts/seed.ts` (never `/data`). Drive
 `/archive/` in a real browser (headless Chrome is fine) and take
-screenshots: the tree mostly dark on a fresh cookie, a mark mid-ignition, a
+screenshots. For the sky: the current week's system from the default camera,
+the arm of older systems receding into the fog, a busy thread as a big planet
+with moons, and a planet mid-spiral inward after a reply. Seed some threads
+replied to minutes ago and some days ago, so the orbits visibly differ.
+Take two screenshots a few seconds apart, in two browser contexts at the same
+moment, and check the planets sit in the same places (the shared sky). Then:
+the sky mostly dark on a fresh cookie, a mark mid-ignition, a
 completed week with its crown, and the HUD counter. For time travel, also
 capture the timeline bar, the tree rewound to mid-week, the thread and comet
 mid-scrub, and playback crossing a seal. Seed marks across at least three
@@ -483,20 +608,28 @@ and different `name` cookies. Screenshot one context watching another's wisp
 fly between branches, an off-screen chip, two wisps at one mark with the chat
 panel open, and a speech bubble. For live branches: post a reply from one
 context, both from the mark page and from the archive's Reply here, and
-screenshot the other context's archive mid-sprout with its siblings gliding
-aside. Check that a second context sitting on `/` sees the new mark appear at
+screenshot the other context's archive as the new moon is born and its
+thread spirals inward. Check that a second context sitting on `/` sees the new mark appear at
 the top of its wall without a reload. Check that hiding the tab closes the stream
 and showing it again restores your wisp for the others. Check there are no
 console errors, that fast key-repeat doesn't snap the camera, that leaving
 time travel restores the full tree, that typing in chat never moves you, and
 that the list view and JS-off pages still work. Then judge it: if arriving
-doesn't feel like an event, the rewind doesn't feel like turning back time,
-or meeting someone at a mark doesn't feel like bumping into them, tune it
-until it does.
+doesn't feel like an event, the sky doesn't read as conversations
+circling their week, the rewind doesn't feel like turning back time, or
+meeting someone at a mark doesn't feel like bumping into them, tune it until
+it does. Also check you can click a moving planet first try, and read its
+label while it moves.
 
 ## Docs
 
-Update `README.md` before the rules: a short section arguing why the
+Update `README.md` before the rules. Rewrite "The tree and the archive" for
+the sky. It's still one tree, but drawn as weeks that are star systems,
+conversations that are planets, and replies that are moons. A conversation's
+orbit shows how alive it is: you can see at a glance what the room is
+talking about *now*, and a reply visibly pulls a thread back to the centre.
+The past is further out along the arm. A sealed week's sky is frozen as it
+was at the seal. Then add a short section arguing why the
 archive is a game of discovery. The point is that the tree becomes a map of
 what *you've* read, which suits a room that comes back weekly; it's not about
 engagement. Say that seen-state is private, and that everyone starts with a
@@ -536,11 +669,14 @@ stays untouched):
   rules don't change. Posting only gains a broadcast after success and a
   JSON answer for `Accept: application/json`. The form-post-and-redirect
   path behaves exactly as now.
-- What the existing keys *mean* (`move()` in `archive-tree.js`) and the tree
-  layout. This run changes how movement *feels*, not where it goes. Time
-  travel only hides what didn't exist yet; it never repositions nodes. Add
-  the new keys (`T`, `Space`, `,`, `.`, `P`, `W`) to the legend without
-  changing the old ones.
+- The tree itself: the same nodes and parents, the previous week as a week
+  root's leftmost child, and ↑/↓/←/→/[/]/Home walking it. Part 0 changes how
+  it's drawn and the order siblings come in (orbit order), nothing else.
+  Time travel only hides what didn't exist yet, plus the orbit changes that
+  follow from it. Add the new keys (`T`, `Space`, `,`, `.`, `P`, `W`) to the
+  legend without changing the old ones.
+- The no-JS list view keeps posting order. It's the reading view, and a
+  document shouldn't reshuffle itself. Only the sky orders by recency.
 - Time travel needs no server change and no schema change. Presence and chat
   need no schema change at all; they never touch SQLite.
 - The home page and mark pages get no presence or chat, and no wisps. Their
@@ -551,12 +687,15 @@ stays untouched):
 - The list view stays complete and readable for screen readers and JS-off
   visitors.
 
-Commit in small, deployable steps (seen-state server + specs, game feel, fog
-of war, `/live` + presence server + specs, live branches, wisps, chat, time
-travel, docs), and keep `main` green throughout. Finish each part, complete
-and polished, before starting the next, in the order 1, 2, 4, 3. Presence,
-live branches and chat come before time travel because being in the archive
-together is what the room asked for most. Part 4's notes on time travel
-apply once Part 3 exists, so wire them up when you build Part 3. If you run short, a finished, good-feeling smaller game beats four
-half-done ones. Whatever didn't get built goes in the README's "not here
+Commit in small, deployable steps (orbit model + tests, the sky, seen-state
+server + specs, game feel, fog of war, `/live` + presence server + specs,
+live branches, wisps, chat, time travel, docs), and keep `main` green
+throughout. Finish each part, complete and polished, before starting the
+next, in the order 0, 1, 2, 4, 3. Part 0 comes first because everything else
+is drawn on it; building the others on the old staircase would mean building
+them twice. Presence, live branches and chat come before time travel because
+being in the archive together is what the room asked for most. Part 4's
+notes on time travel apply once Part 3 exists, so wire them up when you
+build Part 3. If you run short, a finished, good-feeling smaller game beats
+five half-done ones. Whatever didn't get built goes in the README's "not here
 yet" section, so the next run can pick it up.
