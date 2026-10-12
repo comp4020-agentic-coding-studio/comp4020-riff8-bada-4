@@ -157,7 +157,7 @@ ${wall(kids, visitorId, archived ? "No replies, and now there never will be." : 
   );
 }
 
-function archivePage(visitorId: string, now: Date): string {
+function archivePage(visitorId: string, lastName: string, now: Date): string {
   const current = store.currentWeek(now);
   const byParent = new Map<number, MarkWithCount[]>();
   for (const m of store.allMarks()) {
@@ -174,7 +174,9 @@ function archivePage(visitorId: string, now: Date): string {
   });
   return page(
     "Archive · Marks",
-    `<main id="archive">
+    // data-name prefills the scene's Reply here form: the name cookie is
+    // HttpOnly, and this is only ever the visitor's own name.
+    `<main id="archive" data-name="${escapeHtml(lastName)}">
 <h1>Archive</h1>
 <p class="muted" id="archive-intro">Every week of marks, newest first. Each week seals at 00:00 Monday, Sydney time.</p>
 <section id="list-view" aria-labelledby="list-heading">
@@ -536,7 +538,7 @@ const server = createServer((req, res) => {
       }
 
       if (req.method === "GET" && url.pathname === "/archive/") {
-        return sendHtml(res, 200, archivePage(visitorId, now));
+        return sendHtml(res, 200, archivePage(visitorId, lastName, now));
       }
 
       if (req.method === "POST" && url.pathname === "/seen") return await handleSeen(req, res, visitorId, now);

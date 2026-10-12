@@ -546,3 +546,27 @@ export function withSeen(tree, id) {
   nodes.set(id, { ...n, seen: true });
   return { ...tree, nodes };
 }
+
+/**
+ * The tree after a lazy rollover: a new week root at the top, last week's
+ * root becoming its leftmost child, and everything older sealed.
+ * @param {Tree} tree @param {ArchiveWeek} week @param {ArchiveMark} root @returns {Tree}
+ */
+export function withWeek(tree, week, root) {
+  if (tree.nodes.has(root.id)) return tree;
+  /** @type {Map<number, TreeNode>} */
+  const nodes = new Map();
+  for (const [id, n] of tree.nodes) nodes.set(id, { ...n, weekIndex: n.weekIndex + 1, archived: true });
+  const prev = nodes.get(tree.rootId);
+  if (prev) nodes.set(prev.id, { ...prev, parentId: root.id });
+  nodes.set(root.id, {
+    ...root,
+    children: prev ? [prev.id] : [],
+    weekIndex: 0,
+    depth: 0,
+    label: week.label,
+    archived: false,
+    t: Date.parse(root.createdAt),
+  });
+  return { nodes, rootId: root.id, weekRoots: [root.id, ...tree.weekRoots] };
+}

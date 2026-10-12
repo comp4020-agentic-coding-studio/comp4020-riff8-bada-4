@@ -14,13 +14,16 @@ import {
   totalProgress,
   weekComplete,
   weekProgress,
+  withMark,
   withSeen,
+  withWeek,
 } from "./archive-tree.js";
 import * as sound from "./archive-sound.js";
+import { startTogether } from "./archive-together.js";
 
 /** @typedef {import("./archive-tree.js").Move} Move */
 
-const KEYS = /** @type {Record<string, Move | "open">} */ ({
+const KEYS = /** @type {Record<string, Move | "open" | "wave" | "person">} */ ({
   ArrowUp: "up",
   ArrowDown: "down",
   ArrowLeft: "left",
@@ -32,6 +35,10 @@ const KEYS = /** @type {Record<string, Move | "open">} */ ({
   PageUp: "newer",
   Home: "home",
   Enter: "open",
+  w: "wave",
+  W: "wave",
+  p: "person",
+  P: "person",
 });
 
 const timeFormat = new Intl.DateTimeFormat("en-AU", {
@@ -117,6 +124,18 @@ async function main() {
   const pMeta = el("p", { class: "preview-meta" });
   const pOpen = el("a", { class: "preview-open", href: "/" }, "Open");
   preview.append(pWho, pBody, pMeta, pOpen);
+  // Grow a branch from where you are: a small reply form for marks in this week.
+  const reply = el("form", { class: "reply" });
+  const rName = /** @type {HTMLInputElement} */ (
+    el("input", { id: "reply-name", name: "name", required: "", maxlength: "40", autocomplete: "name" })
+  );
+  rName.value = archive.dataset.name ?? "";
+  const rBody = /** @type {HTMLTextAreaElement} */ (el("textarea", { id: "reply-body", name: "body", required: "", maxlength: "280", rows: "2" }));
+  const rBodyLabel = el("label", { for: "reply-body" }, "Reply here");
+  const rSend = el("button", { type: "submit" }, "Reply");
+  reply.append(el("label", { for: "reply-name" }, "Your name"), rName, rBodyLabel, rBody, rSend);
+  const sealedLine = el("p", { class: "preview-sealed" }, "Sealed: nothing can be added to this week now.");
+  preview.append(reply, sealedLine);
 
   const dpad = el("div", { class: "dpad", role: "group", "aria-label": "Move through the tree" });
   /** @type {[Move, string, string][]} */
@@ -143,6 +162,8 @@ async function main() {
     ["[ ]", "older / newer week"],
     ["Enter", "open"],
     ["Home", "back to this week"],
+    ["W", "wave at whoever's here"],
+    ["P", "fly to the next person here"],
   ]) {
     dl.append(el("dt", {}, k), el("dd", {}, v));
   }
@@ -190,7 +211,41 @@ async function main() {
     pOpen.href = id === tree.rootId ? "/" : `/m/${id}`;
     pOpen.textContent = n.isRoot ? `Open ${n.body}` : `Open ${n.name}'s mark`;
     preview.classList.toggle("is-hover", hovered !== null && hovered !== selected);
+    // The reply form belongs to the selection, and never vanishes mid-typing.
+    const sel = tree.nodes.get(selected);
+    const typing = reply.contains(document.activeElement);
+    const open = Boolean(sel && sel.weekIndex === 0 && !sel.archived);
+    if (!typing) {
+      reply.hidden = !open || (hovered !== null && hovered !== selected);
+      rBodyLabel.textContent = sel?.isRoot ? "Leave a mark on this week" : `Reply to ${sel?.name ?? "this"}`;
+    }
+    sealedLine.hidden = Boolean(open || !sel || (hovered !== null && hovered !== selected));
   }
+
+  reply.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const target = selected;
+    rSend.setAttribute("disabled", "");
+    try {
+      const res = await fetch(`/m/${target}`, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ name: rName.value, body: rBody.value }),
+      });
+      if (res.status === 201) {
+        const { id } = await res.json();
+        rBody.value = "";
+        stage.focus();
+        together.expectOwn(id);
+      } else if (res.status === 403) announce.textContent = "That week has sealed, so nothing can be added to it now.";
+      else if (res.status === 404) announce.textContent = "That mark doesn't exist any more.";
+      else announce.textContent = "Write a name and something to say first.";
+    } catch {
+      announce.textContent = "Couldn't reach the server. Try again in a moment.";
+    } finally {
+      rSend.removeAttribute("disabled");
+    }
+  });
 
   const scene = sceneModule.startScene({
     tree,
@@ -296,6 +351,7 @@ async function main() {
     showPreview();
     updateFog();
     announce.textContent = `${first ? "New. " : ""}${describe(tree, id)}`;
+    together.moved();
     // Track position in the URL without a history entry per keypress.
     history.replaceState(null, "", `#m-${id}`);
   }
@@ -307,6 +363,7 @@ async function main() {
 
   /** @param {Move} m */
   function go(m) {
+    together.userMoved();
     const next = move(tree, selected, m, scene.order());
     if (next === null) {
       sound.thud();
@@ -332,6 +389,8 @@ async function main() {
     if (!action) return;
     e.preventDefault();
     if (action === "open") open(selected);
+    else if (action === "wave") together.wave();
+    else if (action === "person") together.next();
     else go(action);
   });
 
@@ -351,6 +410,42 @@ async function main() {
       // after the layout switch, or the scroll lands against the old layout
       requestAnimationFrame(() => item?.scrollIntoView({ block: "center" }));
     }
+  });
+
+  // ---- together: presence, chat, and new marks arriving live -----------------------
+  /** @type {ReturnType<typeof startTogether>} */
+  const together = startTogether({
+    scene,
+    hud,
+    switches,
+    stage,
+    tree: () => tree,
+    selected: () => selected,
+    select: (id) => select(id),
+    announce: (text) => {
+      announce.textContent = "";
+      requestAnimationFrame(() => (announce.textContent = text));
+    },
+    addMark(mark, parentChildCount) {
+      if (tree.nodes.has(mark.id)) return;
+      tree = withMark(tree, mark, parentChildCount);
+      scene.setTree(tree, { born: mark.id });
+      updateFog();
+      showPreview();
+      if (mark.mine) rName.value = mark.name;
+    },
+    addWeek(week, root) {
+      const old = tree.nodes.get(tree.rootId);
+      tree = withWeek(tree, week, root);
+      scene.setTree(tree, { week: root.id });
+      updateFog();
+      showPreview();
+      const text = `${old?.body ?? "Last week"} has sealed. ${week.label} has begun.`;
+      announce.textContent = "";
+      requestAnimationFrame(() => (announce.textContent = text));
+    },
+    timeTravelling: () => false,
+    ownName: () => rName.value.trim(),
   });
 
   // A deep link is an arrival too.

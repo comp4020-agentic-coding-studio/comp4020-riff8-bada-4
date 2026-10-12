@@ -15,6 +15,7 @@ import {
   withSeen,
   sealTime,
   withMark,
+  withWeek,
 } from "../public/archive-tree.js";
 
 // The archive's keyboard rules, on a small hand-built tree (no server, no DOM):
@@ -281,4 +282,19 @@ it("never calls an empty week complete", () => {
 
 it("announces an unexplored mark without its text", () => {
   expect(describe(foggy, 23)).toBe("Week 2, unexplored mark by n23, 1 reply. Select it to read it.");
+});
+
+it("rolls over to a new week: a new root on top, last week sealed beneath it", () => {
+  const t = withWeek(
+    tree,
+    { id: 4, weekStart: "2026-10-12", label: "Week 4", rootMarkId: 40, prevWeekId: 3, archived: false },
+    { ...mark(40, null, 4, [30], true), createdAt: "2026-10-11T13:00:00.000Z" },
+  );
+  expect(t.rootId).toBe(40);
+  expect(t.weekRoots).toEqual([40, 30, 20, 10]);
+  expect(t.nodes.get(30)!.parentId).toBe(40);
+  expect(t.nodes.get(31)!.archived).toBe(true);
+  expect(move(t, 40, "down")).toBeNull(); // nobody's posted in the new week yet
+  expect(move(t, 30, "up")).toBe(40);
+  expect(orbitModel(t, Date.parse("2026-10-12T00:00:00.000Z")).weeks).toEqual([40, 30, 20, 10]);
 });

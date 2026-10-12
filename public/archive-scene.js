@@ -70,9 +70,10 @@ const v3 = (p) => new THREE.Vector3(p.x, p.y, p.z);
  *   onSelect: (id: number) => void,
  *   onHover: (id: number | null) => void,
  *   onOpen: (id: number) => void,
+ *   onChip?: (personId: string) => void,
  * }} opts
  */
-export function startScene({ tree: initialTree, container, initialId, reducedMotion, onSelect, onHover, onOpen }) {
+export function startScene({ tree: initialTree, container, initialId, reducedMotion, onSelect, onHover, onOpen, onChip }) {
   let tree = initialTree;
   let motion = !reducedMotion;
   let paused = false;
@@ -165,7 +166,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
 
   /**
    * @type {Map<number, { mesh: THREE.Mesh, halo: THREE.Sprite, rim: THREE.Sprite, label: CSS2DObject, el: HTMLElement,
-   *   who: HTMLElement, what: HTMLElement, ring: THREE.Line | null, crown: THREE.Mesh | null,
+   *   who: HTMLElement, what: HTMLElement, ring: THREE.Line | null, crown: THREE.Mesh | null, seal: THREE.Mesh | null,
    *   pop: { start: number, amp: number } | null, lit: number, flare: number, pos: THREE.Vector3 }>}
    */
   const bodies = new Map();
@@ -187,6 +188,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     world.add(rim);
     let ring = null;
     let crown = null;
+    let seal = null;
     if (!node.isRoot) {
       ring = new THREE.Line(
         ringGeometry,
@@ -200,6 +202,13 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
       );
       crown.rotation.x = Math.PI / 2;
       world.add(crown);
+      // every sealed week wears a thin pale seal ring
+      seal = new THREE.Mesh(
+        new THREE.TorusGeometry(1, 0.012, 4, 96),
+        new THREE.MeshBasicMaterial({ color: new THREE.Color(0.75, 0.72, 0.68), toneMapped: false, transparent: true, opacity: 0 }),
+      );
+      seal.rotation.x = Math.PI / 2 + 0.25;
+      world.add(seal);
     }
 
     // Body text is real DOM, filled with textContent only.
@@ -223,7 +232,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     const label = new CSS2DObject(el);
     label.center.set(0.5, node.isRoot ? 1 : 0);
     world.add(label);
-    const b = { mesh, halo, rim, label, el, who, what, ring, crown, pop: null, lit: isLit(id) ? 1 : 0, flare: 0, pos: new THREE.Vector3() };
+    const b = { mesh, halo, rim, label, el, who, what, ring, crown, seal, pop: null, lit: isLit(id) ? 1 : 0, flare: 0, pos: new THREE.Vector3() };
     bodies.set(id, b);
     restyle(id);
   }
@@ -386,7 +395,9 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
         d.rTo = body.r;
         d.start = t;
         d.dur = animate ? (spiral.size ? 1.5 : dur) : 0;
-        d.swirl = animate && spiral.has(id) && body.r < d.r;
+        // an extra turn as it spirals in, unless it's coming from so far out
+        // that a whole lap would be a blur
+        d.swirl = animate && spiral.has(id) && body.r < d.r && d.r < 16;
         if (!animate) d.r = body.r;
       }
       if (body.anchor) {
@@ -583,6 +594,16 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     if (full) b.flare = 1;
   }
 
+  /** A week sealing: its star flashes and a pale ring locks round it. @param {number} rootId */
+  function sealFlash(rootId) {
+    const b = bodies.get(rootId);
+    if (!b) return;
+    b.flare = 1;
+    if (!motion) return;
+    const size = disp.get(rootId)?.size ?? 1;
+    shockwave(rootId, size, new THREE.Color(1.6, 1.5, 1.3), 0.7);
+  }
+
   /** Feel the wall: the camera nudges toward the blocked direction and springs back. @param {string} dir */
   function bump(dir) {
     if (!motion) return;
@@ -754,6 +775,7 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
         b.mesh.visible = b.halo.visible = b.rim.visible = b.label.visible = false;
         if (b.ring) b.ring.visible = false;
         if (b.crown) b.crown.visible = false;
+        if (b.seal) b.seal.visible = false;
         continue;
       }
       const isStar = node.isRoot;
@@ -840,6 +862,15 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
         b.crown.scale.setScalar(s * 1.9 * (motion ? 1 + Math.sin(ts * 1.2) * 0.03 : 1));
       }
 
+      if (b.seal) {
+        const mat = /** @type {THREE.MeshBasicMaterial} */ (b.seal.material);
+        const want = weekIndex > 0 ? 0.55 : 0;
+        mat.opacity += (want - mat.opacity) * Math.min(1, dt * (motion ? 1.5 : 60));
+        b.seal.visible = mat.opacity > 0.01 && b.mesh.visible;
+        b.seal.position.copy(b.pos);
+        b.seal.scale.setScalar(s * 1.5);
+      }
+
       // Labels fade with distance, and only once their body has condensed.
       // a star's label sits above it, clear of its inner planets
       if (isStar) b.label.position.set(b.pos.x, b.pos.y + s * 1.25 + 0.2, b.pos.z);
@@ -897,12 +928,12 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
       }
     } else {
       // Ride along with the selected body as it orbits.
+      // (catching up harder the further behind it falls, so a body
+      // spiralling inward never outruns the camera)
       const delta = focus.clone().sub(controls.target);
-      const k = motion ? Math.min(1, dt * 6) : 1;
-      if (delta.length() < 30 || !motion) {
-        controls.target.addScaledVector(delta, k);
-        camera.position.addScaledVector(delta, k);
-      }
+      const k = motion ? Math.min(1, dt * (6 + delta.length() * 2)) : 1;
+      controls.target.addScaledVector(delta, k);
+      camera.position.addScaledVector(delta, k);
       // ease the framing distance
       const offset = camera.position.clone().sub(controls.target);
       if (motion && Math.abs(offset.length() - viewDist) > 0.05 && framing) {
@@ -985,6 +1016,8 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
       armGeometry.attributes.color.needsUpdate = true;
     }
 
+    updateWisps(ts, dt);
+
     controls.target.add(extra);
     camera.position.add(extra);
     controls.update();
@@ -997,6 +1030,205 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
   // Framing eases only right after a selection, so a user's own zoom sticks.
   let framing = true;
   controls.addEventListener("start", () => (framing = false));
+
+
+  // ---- wisps: everyone else in the archive right now ------------------------------
+  /**
+   * @typedef {{ person: import("./archive-presence.js").Person, name: string, core: THREE.Mesh, glow: THREE.Sprite,
+   *   label: CSS2DObject, el: HTMLElement, nameEl: HTMLElement, trail: THREE.Line, trailPts: THREE.Vector3[],
+   *   flight: { from: THREE.Vector3, ids: number[], start: number, dur: number } | null, markId: number | null,
+   *   pos: THREE.Vector3, flare: number, chip: HTMLButtonElement, speech: { obj: CSS2DObject, until: number } | null }} Wisp
+   */
+  /** @type {Map<string, Wisp>} */
+  const wisps = new Map();
+  const wispGeometry = new THREE.SphereGeometry(1, 12, 8);
+  const TRAIL = 28;
+  const chips = document.createElement("div");
+  chips.className = "chips";
+  chips.setAttribute("aria-hidden", "true");
+  container.append(chips);
+  /** Where a wisp shows for a mark: itself, or (in the past) its nearest existing ancestor. */
+  let wispMark = (/** @type {number} */ id) => id;
+
+  /** @param {import("./archive-presence.js").Person} person @param {string} name */
+  function makeWisp(person, name) {
+    const colour = new THREE.Color(person.colour).multiplyScalar(1.6);
+    const core = new THREE.Mesh(wispGeometry, new THREE.MeshBasicMaterial({ color: colour, toneMapped: false }));
+    core.scale.setScalar(0.07);
+    const glowSprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: glow, color: colour, transparent: true, opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending }),
+    );
+    glowSprite.scale.setScalar(0.55);
+    const trailGeometry = new THREE.BufferGeometry();
+    trailGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(TRAIL * 3), 3));
+    const fade = new Float32Array(TRAIL * 3);
+    for (let i = 0; i < TRAIL; i++) {
+      const k = (1 - i / TRAIL) ** 2;
+      fade.set([colour.r * k, colour.g * k, colour.b * k], i * 3);
+    }
+    trailGeometry.setAttribute("color", new THREE.BufferAttribute(fade, 3));
+    const trail = new THREE.Line(
+      trailGeometry,
+      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }),
+    );
+    trail.frustumCulled = false;
+    const el = document.createElement("div");
+    el.className = "wisp-label";
+    el.style.setProperty("--wisp", person.colour);
+    const nameEl = document.createElement("span");
+    el.append(nameEl);
+    const label = new CSS2DObject(el);
+    label.center.set(-0.15, 0.5);
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip";
+    chip.tabIndex = -1;
+    chip.style.setProperty("--wisp", person.colour);
+    chip.addEventListener("click", () => onChip?.(person.id));
+    chips.append(chip);
+    world.add(core, glowSprite, trail, label);
+    /** @type {Wisp} */
+    const w = {
+      person,
+      name,
+      core,
+      glow: glowSprite,
+      label,
+      el,
+      nameEl,
+      trail,
+      trailPts: [],
+      flight: null,
+      markId: null,
+      pos: new THREE.Vector3(),
+      flare: 0,
+      chip,
+      speech: null,
+    };
+    wisps.set(person.id, w);
+    return w;
+  }
+
+  /** @param {Wisp} w */
+  function dropWisp(w) {
+    world.remove(w.core, w.glow, w.trail, w.label);
+    w.label.element.remove();
+    if (w.speech) {
+      world.remove(w.speech.obj);
+      w.speech.obj.element.remove();
+    }
+    w.chip.remove();
+    w.trail.geometry.dispose();
+    wisps.delete(w.person.id);
+  }
+
+  /** Where a wisp idles: circling the body it's at, spread out from others there. @param {Wisp} w @param {number} ts */
+  function idleSpot(w, ts) {
+    const mark = w.markId === null ? null : wispMark(w.markId);
+    if (mark === null || !bodies.has(mark)) return null;
+    const here = [...wisps.values()].filter((o) => o.markId !== null && wispMark(o.markId) === mark).map((o) => o.person.id).sort();
+    const slot = Math.max(0, here.indexOf(w.person.id));
+    const size = Math.max(0.18, (disp.get(mark)?.size ?? 0.3) * (tree.nodes.get(mark)?.isRoot ? 1.4 : 2.1));
+    const a = (motion ? ts * 0.9 : 0) + (slot / Math.max(1, here.length)) * Math.PI * 2 + (motion ? 0 : 0.6);
+    return posOf(mark).add(new THREE.Vector3(Math.cos(a) * size, 0.12 + Math.sin(a * 2) * 0.05, Math.sin(a) * size));
+  }
+
+  /** @param {number} ts @param {number} dt */
+  function updateWisps(ts, dt) {
+    const rect = renderer.domElement.getBoundingClientRect();
+    for (const w of wisps.values()) {
+      const spot = idleSpot(w, ts);
+      if (w.flight) {
+        const u = clamp01((ts - w.flight.start) / w.flight.dur);
+        const e = easeInOut(u);
+        const p = alongRoute(routePoints(w.flight.from, w.flight.ids), e);
+        if (spot) p.lerp(spot, e * e);
+        w.pos.copy(p);
+        if (u >= 1) w.flight = null;
+      } else if (spot) {
+        w.pos.lerp(spot, motion ? Math.min(1, dt * 8) : 1);
+      }
+      const visible = spot !== null;
+      const ghost = w.markId !== null && wispMark(w.markId) !== w.markId;
+      w.flare = Math.max(0, w.flare - dt * 1.2);
+      w.core.position.copy(w.pos);
+      w.glow.position.copy(w.pos);
+      w.core.scale.setScalar(0.07 * (1 + w.flare * 2));
+      w.glow.scale.setScalar((0.55 + w.flare * 0.9) * (motion ? 1 + Math.sin(ts * 3 + w.pos.x) * 0.08 : 1));
+      /** @type {THREE.SpriteMaterial} */ (w.glow.material).opacity = ghost ? 0.3 : 0.85;
+      w.core.visible = w.glow.visible = w.label.visible = visible;
+      // A short fading trail follows it while it travels.
+      if (motion && visible) {
+        w.trailPts.unshift(w.pos.clone());
+        if (w.trailPts.length > TRAIL) w.trailPts.length = TRAIL;
+      } else w.trailPts = [w.pos.clone()];
+      const arr = /** @type {Float32Array} */ (w.trail.geometry.attributes.position.array);
+      for (let i = 0; i < TRAIL; i++) {
+        const p = w.trailPts[Math.min(i, w.trailPts.length - 1)] ?? w.pos;
+        arr.set([p.x, p.y, p.z], i * 3);
+      }
+      w.trail.geometry.attributes.position.needsUpdate = true;
+      w.trail.visible = visible && motion;
+
+      w.label.position.copy(w.pos);
+      w.nameEl.textContent = `${w.person.timeTravelling ? "⏱ " : ""}${w.name}`;
+      const d = w.pos.distanceTo(camera.position);
+      const far = Math.max(LABEL_FAR, viewDist * 1.9) * 1.3;
+      w.el.style.opacity = (clamp01((far - d) / (far * 0.45)) * (ghost ? 0.5 : 1)).toFixed(2);
+      if (w.speech) {
+        w.speech.obj.position.copy(w.pos).add(new THREE.Vector3(0, 0.25, 0));
+        const left = w.speech.until - ts;
+        w.speech.obj.element.style.opacity = clamp01(left / 1.2).toFixed(2);
+        if (left <= 0) {
+          world.remove(w.speech.obj);
+          w.speech.obj.element.remove();
+          w.speech = null;
+        }
+      }
+
+      // Off-screen people get a chip at the edge of the stage, pointing at them.
+      const p = w.pos.clone().project(camera);
+      const behind = w.pos.clone().sub(camera.position).dot(camera.getWorldDirection(new THREE.Vector3())) < 0;
+      const off = visible && (behind || Math.abs(p.x) > 0.96 || Math.abs(p.y) > 0.94);
+      w.chip.hidden = !off;
+      if (off) {
+        let x = behind ? -p.x : p.x;
+        let y = behind ? -p.y : p.y;
+        const k = 1 / Math.max(Math.abs(x) / 0.9, Math.abs(y) / 0.84, 1e-6);
+        x *= k;
+        y *= k;
+        w.chip.style.left = `${((x + 1) / 2) * rect.width}px`;
+        w.chip.style.top = `${((1 - y) / 2) * rect.height}px`;
+        w.chip.style.setProperty("--angle", `${Math.atan2(-y, x)}rad`);
+        w.chip.textContent = w.name;
+      }
+    }
+    // Your own speech bubbles float above your selection.
+    for (let i = ownSpeech.length - 1; i >= 0; i--) {
+      const sp = ownSpeech[i];
+      const left = sp.until - ts;
+      sp.obj.position.copy(posOf(selected)).add(new THREE.Vector3(0, (disp.get(selected)?.size ?? 0.3) + 0.35, 0));
+      sp.obj.element.style.opacity = clamp01(left / 1.2).toFixed(2);
+      if (left <= 0) {
+        world.remove(sp.obj);
+        sp.obj.element.remove();
+        ownSpeech.splice(i, 1);
+      }
+    }
+  }
+  /** @type {{ obj: CSS2DObject, until: number }[]} */
+  const ownSpeech = [];
+
+  /** A speech bubble, MMO-style: DOM, textContent only. @param {string} text */
+  function speechBubble(text) {
+    const el = document.createElement("div");
+    el.className = "speech";
+    el.textContent = text;
+    const obj = new CSS2DObject(el);
+    obj.center.set(0.5, 1);
+    world.add(obj);
+    return obj;
+  }
 
   // Hooks for the later parts; plain state the frame reads.
   let timeTravel = false;
@@ -1038,22 +1270,27 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
      * Swap in a new tree (a live arrival, your reply, or a mark lit). `born`
      * is a new mark: its ring sweeps round, it condenses, and its whole
      * thread spirals inward.
-     * @param {Tree} next @param {{ born?: number }} [opts]
+     * A `week` is a new week root: the old week flashes and locks, the new
+     * sun ignites at the centre, and the old system slides out along the arm.
+     * @param {Tree} next @param {{ born?: number, week?: number }} [opts]
      */
-    setTree(next, { born } = {}) {
+    setTree(next, { born, week } = {}) {
+      const oldRoot = tree.rootId;
       tree = next;
       for (const id of tree.nodes.keys()) if (!bodies.has(id)) makeBody(id);
       const spiral = new Set();
       if (born !== undefined) for (let p = born; p !== null && p !== undefined; p = tree.nodes.get(p)?.parentId) spiral.add(p);
       if (!timeTravel) rebuild(liveNow(), { spiral: born === undefined ? undefined : spiral, dur: 1.5 });
       for (const id of tree.nodes.keys()) restyle(id);
-      if (born !== undefined) {
-        const d = disp.get(born);
+      for (const id of [born, week]) {
+        const d = id === undefined ? undefined : disp.get(id);
         if (d) {
           d.grow = motion ? 0 : 1;
           d.growDelay = 0;
+          d.start = nowS();
         }
       }
+      if (week !== undefined) sealFlash(oldRoot);
     },
     /** Swap in a tree with the same marks (one just lit): restyle only. @param {Tree} next */
     refresh(next) {
@@ -1079,12 +1316,76 @@ export function startScene({ tree: initialTree, container, initialId, reducedMot
     onArrive(fn) {
       arrivalHook = fn;
     },
+    /**
+     * Everyone else here now. New people appear at their mark; a move flies
+     * the wisp along the hierarchy from wherever it is, never snapping.
+     * @param {Map<string, import("./archive-presence.js").Person>} people @param {Map<string, string>} names
+     */
+    setPeople(people, names) {
+      for (const [id, w] of wisps) if (!people.has(id)) dropWisp(w);
+      const ts = nowS();
+      for (const [id, person] of people) {
+        const w = wisps.get(id) ?? makeWisp(person, names.get(id) ?? person.name);
+        w.person = person;
+        w.name = names.get(id) ?? person.name;
+        if (person.markId === w.markId) continue;
+        const from = w.markId;
+        w.markId = person.markId;
+        if (from === null || person.markId === null || !motion) {
+          w.flight = null;
+          const spot = idleSpot(w, ts);
+          if (spot) w.pos.copy(spot);
+          w.trailPts = [];
+          continue;
+        }
+        const ids = pathBetween(tree, wispMark(from), wispMark(person.markId)).slice(1);
+        let length = 0;
+        const pts = routePoints(w.pos.clone(), ids);
+        for (let i = 1; i < pts.length; i++) length += pts[i].distanceTo(pts[i - 1]);
+        w.flight = { from: w.pos.clone(), ids, start: ts, dur: Math.min(1.7, 0.45 + length * 0.03) };
+      }
+    },
+    /** A wave: a ripple in the waver's colour from that mark. @param {number} markId @param {string} colour */
+    wave(markId, colour) {
+      if (!bodies.has(wispMark(markId))) return;
+      const c = new THREE.Color(colour).multiplyScalar(1.5);
+      const size = Math.max(0.25, disp.get(wispMark(markId))?.size ?? 0.3);
+      if (motion) {
+        shockwave(wispMark(markId), size, c, 0.9);
+        setTimeout(() => shockwave(wispMark(markId), size, c, 0.9), 220);
+      } else {
+        // reduced motion: a brief static highlight instead of a ripple
+        const b = bodies.get(wispMark(markId));
+        if (b) b.flare = 0.6;
+      }
+    },
+    /** A bright flare on someone's wisp (they just posted). @param {string} id */
+    flareWisp(id) {
+      const w = wisps.get(id);
+      if (w) w.flare = 1;
+    },
+    /** Someone's message floats above their wisp (null: you, above your selection). @param {string | null} id @param {string} text */
+    speak(id, text) {
+      const until = nowS() + 6;
+      if (id === null) {
+        ownSpeech.push({ obj: speechBubble(text), until });
+        return;
+      }
+      const w = wisps.get(id);
+      if (!w) return;
+      if (w.speech) {
+        world.remove(w.speech.obj);
+        w.speech.obj.element.remove();
+      }
+      w.speech = { obj: speechBubble(text), until };
+    },
     /** For checks: how many bodies the scene holds and whether it's mid-flight. */
     stats: () => ({
       nodes: bodies.size,
       bodies: [...disp.values()].filter((d) => d.growTarget > 0).length,
       flying: flight !== null,
       selected,
+      wisps: [...wisps.values()].map((w) => ({ id: w.person.id, markId: w.markId, flying: w.flight !== null, onScreen: w.chip.hidden })),
       cameraTarget: controls.target.toArray().map((x) => Number(x.toFixed(3))),
     }),
     /** For checks: where a body is on screen (pixels), or null. @param {number} id */
