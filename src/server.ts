@@ -4,7 +4,7 @@ import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { marked } from "marked";
-import { getCookie, getVisitorId, setCookie } from "./cookies.ts";
+import { clearCookie, getCookie, getVisitorId, setCookie } from "./cookies.ts";
 import {
   archiveList,
   crumbs,
@@ -18,18 +18,31 @@ import {
   replyCount,
   wall,
 } from "./render.ts";
-import { openStore, type MarkWithCount, type Store } from "./db.ts";
+import { openStore, SYSTEM_NAME, type MarkWithCount, type Store, type WeekRow } from "./db.ts";
+import { DEFAULT_NAME, Presence, who, type Stream } from "./presence.ts";
 import { weekLabel } from "./week.ts";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const MAX_REQUEST_BYTES = 8192;
+const HEARTBEAT_MS = 20_000;
+const SWEEP_MS = 500;
+
+// Who's in the archive and what they've said at a mark: memory only, never
+// SQLite (see src/presence.ts). LIVE_GRACE_MS overrides the 5s leave grace.
+const live = new Presence({
+  graceMs: process.env.LIVE_GRACE_MS ? Number(process.env.LIVE_GRACE_MS) : undefined,
+  log: (line) => console.log(line),
+});
+setInterval(() => live.ping(), HEARTBEAT_MS).unref();
+setInterval(() => live.sweep(), SWEEP_MS).unref();
 
 // One SQLite file on the mounted volume: /data survives a restart or a
 // redeploy, nothing else does (see fly.toml). DATA_DIR overrides it for a
-// local run, where there's no volume.
+// local run, where there's no volume. A request that rolls the week over
+// tells every open stream.
 const dataDir = process.env.DATA_DIR ?? "/data";
 mkdirSync(dataDir, { recursive: true });
-const store: Store = openStore(`${dataDir}/marks.sqlite`);
+const store: Store = openStore(`${dataDir}/marks.sqlite`, { onNewWeek: broadcastWeek });
 
 // three.js is served from node_modules under its version, and our client
 // modules under a hash of their contents, so both can be cached for good and a
@@ -268,6 +281,148 @@ async function handleSeen(req: IncomingMessage, res: ServerResponse, visitorId: 
   sendStatus(res, 204);
 }
 
+function sendJson(res: ServerResponse, status: number, data: unknown): void {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(data));
+}
+
+// ---- Live: /live and its POSTs ---------------------------------------------
+
+// A new mark, to every open stream: the public fields /archive.json sends,
+// with `mine` and `seen` worked out per recipient. Only ever called after
+// store.post succeeded.
+function broadcastMark(id: number, authorVisitorId: string): void {
+  const mark = store.getMark(id);
+  const parent = mark?.parent_id == null ? undefined : store.getMark(mark.parent_id);
+  if (!mark || !parent) return;
+  live.broadcastEach((visitorId) => {
+    const mine = visitorId === authorVisitorId;
+    return {
+      type: "mark",
+      mark: {
+        id: mark.id,
+        parentId: parent.id,
+        weekId: mark.week_id,
+        isRoot: false,
+        name: mark.name,
+        body: mark.body,
+        createdAt: mark.created_at,
+        childCount: 0,
+        children: [],
+        mine,
+        seen: mine,
+      },
+      parentChildCount: parent.child_count,
+    };
+  });
+}
+
+// The store's new-week hook: whoever's request crossed 00:00 Monday, every
+// open archive hears about the new root. Lazy, like the rollover itself.
+function broadcastWeek(week: WeekRow): void {
+  const root = store.getMark(week.root_mark_id);
+  if (!root) return;
+  const prev = week.prev_week_id === null ? undefined : store.getWeek(week.prev_week_id);
+  live.broadcast({
+    type: "week",
+    week: {
+      id: week.id,
+      weekStart: week.week_start,
+      label: weekLabel(week.week_start),
+      rootMarkId: week.root_mark_id,
+      prevWeekId: week.prev_week_id,
+      archived: false,
+    },
+    root: {
+      id: root.id,
+      parentId: null,
+      weekId: week.id,
+      isRoot: true,
+      name: SYSTEM_NAME,
+      body: root.body,
+      createdAt: root.created_at,
+      childCount: 0,
+      children: prev ? [prev.root_mark_id] : [],
+      mine: false,
+      seen: true,
+    },
+  });
+}
+
+// The name others see: the one this visitor last posted under.
+function liveName(req: IncomingMessage): string {
+  const name = (getCookie(req, "name") ?? "").trim().slice(0, MAX_NAME);
+  return hasVisibleContent(name) ? name : DEFAULT_NAME;
+}
+
+function liveHidden(req: IncomingMessage): boolean {
+  return getCookie(req, "presence") === "hidden";
+}
+
+function handleLive(req: IncomingMessage, res: ServerResponse, url: URL, visitorId: string, now: Date): void {
+  store.currentWeek(now);
+  // hello is written during connect, before we know whether to answer 200,
+  // so hold it until the headers are out.
+  let pending: string[] | null = [];
+  const stream: Stream = {
+    visitorId,
+    write: (chunk) => {
+      if (pending) pending.push(chunk);
+      else res.write(chunk);
+    },
+  };
+  const result = live.connect(visitorId, liveName(req), liveHidden(req), url.searchParams.get("presence"), stream);
+  if (result.status !== 200) {
+    res.writeHead(result.status, { "Cache-Control": "no-store", "Retry-After": "10" });
+    res.end();
+    return;
+  }
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(pending.join(""));
+  pending = null;
+  res.on("close", () => live.disconnect(stream));
+}
+
+async function handleLivePost(
+  req: IncomingMessage,
+  res: ServerResponse,
+  action: string,
+  visitorId: string,
+  now: Date,
+): Promise<void> {
+  if (crossSite(req)) return sendStatus(res, 403);
+  const form = await readForm(req);
+  if (!form) return sendStatus(res, 413);
+  // Position posts are frequent, which makes them the lazy rollover's tick.
+  store.currentWeek(now);
+
+  if (action === "hide") {
+    const hidden = form.get("hidden") === "1";
+    if (hidden) setCookie(res, "presence", "hidden");
+    else clearCookie(res, "presence");
+    live.hide(visitorId, hidden);
+    return sendStatus(res, 204);
+  }
+
+  const presenceId = form.get("presence") ?? "";
+  if (!live.owns(visitorId, presenceId)) return sendStatus(res, 403);
+  if (action === "wave") return sendStatus(res, live.wave(visitorId, presenceId));
+
+  const markId = formId(form.get("mark"));
+  if (markId === undefined) return sendStatus(res, 400);
+  if (action === "move") {
+    if (!store.getMark(markId)) return sendStatus(res, 404);
+    const tt = form.get("tt") === "1";
+    return sendStatus(res, live.move(visitorId, presenceId, markId, tt, liveName(req), liveHidden(req)));
+  }
+  // say
+  return sendStatus(res, live.say(visitorId, presenceId, markId, form.get("text") ?? ""));
+}
+
 async function serveStatic(pathname: string, res: ServerResponse): Promise<boolean> {
   for (const [prefix, dir] of STATIC_ROOTS) {
     if (!pathname.startsWith(prefix)) continue;
@@ -300,18 +455,25 @@ async function handlePost(
   parentId: number | null,
   now: Date,
 ): Promise<void> {
+  // The archive's Reply here form asks for JSON; everything else gets the
+  // form-post-and-redirect answers, unchanged.
+  const json = (req.headers.accept ?? "").includes("application/json");
   const params = new URLSearchParams(await readBody(req));
   const name = (params.get("name") ?? "").trim().slice(0, MAX_NAME);
   const body = (params.get("body") ?? "").trim().slice(0, MAX_BODY);
   const back = parentId === null ? "/" : `/m/${parentId}`;
   if (!hasVisibleContent(name) || !hasVisibleContent(body)) {
-    if (parentId !== null && !store.getMark(parentId)) return notFound(res);
+    if (parentId !== null && !store.getMark(parentId)) {
+      return json ? sendJson(res, 404, { error: "not-found" }) : notFound(res);
+    }
+    if (json) return sendJson(res, 400, { error: "blank" });
     res.writeHead(303, { Location: back });
     res.end();
     return;
   }
   const result = store.post(visitorId, name, body, parentId, now);
   if (!result.ok) {
+    if (json) return sendJson(res, result.reason === "not-found" ? 404 : 403, { error: result.reason });
     if (result.reason === "not-found") return notFound(res);
     const parent = store.getMark(parentId ?? 0);
     sendHtml(
@@ -322,6 +484,9 @@ async function handlePost(
     return;
   }
   setCookie(res, "name", name);
+  console.log(`post mark=${result.id} parent=${result.parentId} by=${who(visitorId)}`);
+  broadcastMark(result.id, visitorId);
+  if (json) return sendJson(res, 201, { id: result.id });
   const current = store.currentWeek(now);
   res.writeHead(303, { Location: result.parentId === current.root_mark_id ? "/" : back });
   res.end();
@@ -371,6 +536,10 @@ const server = createServer((req, res) => {
       }
 
       if (req.method === "POST" && url.pathname === "/seen") return await handleSeen(req, res, visitorId, now);
+
+      if (req.method === "GET" && url.pathname === "/live") return handleLive(req, res, url, visitorId, now);
+      const liveAction = url.pathname.match(/^\/live\/(move|say|wave|hide)$/)?.[1];
+      if (req.method === "POST" && liveAction) return await handleLivePost(req, res, liveAction, visitorId, now);
       if (req.method === "GET" && url.pathname === "/archive") {
         res.writeHead(301, { Location: "/archive/" });
         res.end();

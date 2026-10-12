@@ -35,6 +35,10 @@ export function setCookie(res: ServerResponse, name: string, value: string): voi
   );
 }
 
+export function clearCookie(res: ServerResponse, name: string): void {
+  res.appendHeader("Set-Cookie", `${name}=; Path=/; Max-Age=0; SameSite=Lax; HttpOnly`);
+}
+
 // The one piece of identity this app has: a random id in a first-party
 // cookie, issued the first time someone shows up. No accounts, no passwords —
 // it only has to tell two visitors apart, not verify who they are.
