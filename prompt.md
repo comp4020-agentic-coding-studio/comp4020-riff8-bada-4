@@ -10,7 +10,7 @@ pointer input), `public/archive.js` (keys, D-pad, HUD, announcements) and
 `spec/archive-tree.test.ts`).
 
 This run turns the archive from a diagram you can move around into
-**something that plays like a small exploration game**. It has three parts
+**something that plays like a small exploration game**. It has four parts
 that feed each other:
 
 1. **Game feel.** Moving through the tree should feel responsive and
@@ -21,6 +21,10 @@ that feed each other:
 3. **Time travel.** A timeline you can scrub, or play, to rewind the tree to
    any past moment and watch it grow back. A glowing thread runs through the
    branches in the order things were actually said.
+4. **Together in the archive.** You see everyone else who's in the archive
+   right now, as wisps of light that fly along the branches as they move.
+   When two or more of you stop at the same mark, you can chat there. The
+   chat vanishes when the mark empties.
 
 Nobody is around to answer questions. Where this prompt leaves something
 open, make the call and explain it in the commit message.
@@ -221,6 +225,135 @@ Edge cases worth a test: two marks with the same `createdAt`, so order must
 be stable (fall back to id). A time before the first week. A week root at
 exactly its seal time.
 
+## Part 4: together in the archive (live presence and mark-side chat)
+
+This is the app's first real-time feature. The README currently says
+real-time "belongs to later crits", so update that. Presence and chat are
+live. Marks themselves still don't push live; new marks still appear on
+reload. Leave that alone.
+
+### Transport: Server-Sent Events, no dependency
+
+- `GET /presence` is a `text/event-stream` built on plain `node:http`. Use
+  SSE, not WebSockets: SSE needs no dependency, and the rules forbid adding
+  one without justification. The browser sends updates with small
+  same-origin `fetch` POSTs. Send a comment heartbeat every ~20s so Fly's
+  proxy keeps the stream open.
+- All presence and chat state lives **in server memory only**, in a new
+  module (`src/presence.ts`). Never write it to SQLite and never log
+  message text. A restart or deploy wipes it, and that's correct. There's
+  one machine (`--ha=false`), so in-memory is the whole truth.
+- **Identity:** each person gets an **ephemeral presence id**, random and
+  never derived from `visitor_id`, which still never leaves the server. Map
+  presence id → visitor id server-side only. Every POST carries the presence
+  id, and the server checks that the request's `visitor` cookie owns it.
+  Presence ids are visible to everyone, so this ownership check is what stops
+  someone moving or speaking as another person. Wrong owner gets `403`.
+- **Reconnects:** when a stream drops, wait ~5s before broadcasting
+  `leave`. If the same visitor reconnects inside that window, give them back
+  the same presence id, so a network blip or a deploy doesn't make everyone
+  flicker out and back in.
+- **The machine must still sleep.** An open stream keeps the Fly machine
+  awake (`auto_stop_machines` in `fly.toml`). The client closes its
+  EventSource once the tab has been hidden for ~60s, and reopens it, then
+  re-sends its position, when the tab is visible again. A forgotten
+  background tab must not keep the app running all night.
+- **Limits** (the machine has 256 MB): cap total streams (around 60) and
+  streams per visitor (around 4). Rate-limit moves to ~10/s and chat to about
+  1 message/s with a small burst, returning `429` past the limit. Reject
+  cross-site POSTs with the same `Sec-Fetch-Site` rule as `POST /seen`.
+- **Event shapes** are JSON:
+  - `hello`: your presence id, plus a snapshot of everyone else
+  - `join`, `move`, `leave`, `wave`
+  - `say`, which goes only to people at that mark
+  
+  A person is `{ id, name, colour, markId, timeTravelling }`. `name` is the
+  `name` cookie (the name they last posted under), capped at `MAX_NAME`, or
+  "Someone" if they've never posted. Disambiguate duplicate names with their
+  colour, for example "Someone (amber)". The client renders every name and
+  message with `textContent` only.
+
+### Seeing each other
+
+- Each other person is a **wisp**: a small glowing orb in their own colour,
+  picked from a palette distinct from the tree's gold, teal and rose. It
+  orbits the bubble they're at, and several people at one mark spread around
+  it rather than stacking. Their name floats beside it as a CSS2D label that
+  fades with distance like the bubble labels. You don't see a wisp for
+  yourself; you have the selection ring.
+- **Travelling:** when someone moves, their wisp **flies along the real
+  edges** from their old mark to the new one, using the same `flightPath` and
+  easing as your own camera. A short fading trail follows it, so you can
+  watch them travel through the branches. If they move again mid-flight, the
+  wisp carries on from where it is, never snapping (the same rule as Part 1).
+- **Off-screen people** get a small chip at the edge of the stage in their
+  colour, with their name, pointing toward them. Clicking it flies you there.
+- **A "Here now" panel** in the HUD lists everyone present with where they
+  are (the week label and "on Ana's mark"). Each entry has **Fly to** and
+  **Follow** buttons. Follow makes your camera ride along behind them until
+  you press a movement key or unfollow. `P` flies you to the next person in
+  turn. This panel is also the accessible way to know who's around.
+- **Wave:** `W` sends a wave at your current mark. Everyone who can see that
+  mark gets a ripple in your colour from it (and a soft chime if their sound
+  is on). It's rate-limited to one every few seconds.
+- **"Hide me"** is a HUD toggle (`aria-pressed`), on the server side. It
+  sets a `presence=hidden` cookie, and a hidden visitor is never broadcast at
+  all: you still see others, but nobody sees you, and you can't chat. It
+  survives a reload because it's a cookie.
+- **The live region** stays polite. It announces when someone joins or
+  leaves the archive and when someone arrives at or leaves *your* mark, but
+  not every move anyone makes.
+- **With other parts:** someone else's presence never marks anything seen for
+  you. Following them does, because you actually arrive (Part 2). A peer at an
+  ember you haven't lit doesn't reveal its text. If a peer's mark doesn't
+  exist at your scrub time (Part 3), their wisp waits, ghosted, at the
+  nearest ancestor that does. A peer who is time travelling shows a small
+  clock glyph.
+- **Reduced motion:** wisps cut from mark to mark with no flight, trail or
+  orbit, and waves show as a brief static highlight.
+
+### Chatting at a mark
+
+- A **room is a mark.** When two or more visible people are at the same mark,
+  a **chat panel** opens in the HUD for everyone there: "Here with Ana, Ben",
+  the message list, and a labelled text input (around 200 characters, Enter
+  sends, `Esc` returns focus to the stage). The archive's keys already ignore
+  input that isn't aimed at the body or stage. Keep it that way so typing
+  never moves you. When you leave the mark, the panel closes for you; when
+  you're the only one left, it closes.
+- **Speech bubbles in the scene:** each message also floats briefly above
+  the speaker's wisp (or above your selection, for your own), MMO-style, then
+  fades. They're rendered as DOM with `textContent`.
+- **The server enforces the room:** `say` is accepted only from a visible
+  person who is currently at that mark with at least one other visible person
+  there. It goes only to the people at that mark. Blank or zero-width-only
+  text is rejected with the same `hasVisibleContent` check as marks. Over-long
+  text is cut to the limit.
+- **It's ephemeral, and it says so.** A room keeps at most its last ~20 lines
+  or ~10 minutes, whichever is less, so someone who walks up mid-conversation
+  sees a little context. The moment a room empties, its lines are dropped. The
+  panel carries a quiet line: "Chat disappears when everyone leaves. Leave a
+  mark to keep something." Chat never becomes a mark on its own.
+- **Sealed weeks:** chatting at a mark in a sealed week is fine. Nothing is
+  added to the week and nothing persists, so the seal's promise holds. Say
+  this in the README.
+- **Mute:** each person in your chat panel has a Mute button that hides
+  their messages and bubbles for you. It's client-side and lasts for the
+  session, and it's the only moderation a room of a dozen needs.
+- **A second live region** announces other people's messages ("Ana: …"),
+  separate from the navigation announcements.
+
+### Logic and tests
+
+- `src/presence.ts` holds the session and room logic as plain functions or
+  a class over an injected clock: join, move, leave with grace, room
+  membership, history trimming and rate limits. Unit-test it directly, like
+  `spec/store.test.ts` does for the store.
+- Client state lives in `public/archive-presence.js`: the EventSource,
+  reconnect and visibility handling, merging snapshots and events, and who's
+  at my mark. Keep the parts that can be pure, pure, and test those too.
+  Rendering wisps and bubbles goes through a small API on the scene object.
+
 ## Specs
 
 Extend `spec/marks.test.ts` (it gates the deploy) with HTTP checks against
@@ -234,6 +367,24 @@ the running app:
   nothing and isn't a 500. A cross-site `Sec-Fetch-Site` gets 403.
 - the no-JS `/archive/` list shows the "new" marker on an unseen mark and not
   on a seen one
+- `GET /presence` answers `text/event-stream` with a `hello`. Neither it nor
+  any later event ever contains a visitor cookie's value.
+- with two visitors streaming, B moving to a mark gives A a `move` with B's
+  presence id. Closing B's stream gives A a `leave` after the grace period.
+- a POST using another visitor's presence id gets 403 and broadcasts nothing.
+  A move to an unknown mark gets a 4xx and broadcasts nothing.
+- a hidden visitor (`presence=hidden`) never appears in anyone's events
+- with A and B at the same mark, A's `say` reaches B. C, at a different
+  mark, gets nothing. Saying when alone, at a mark you're not at, or while
+  hidden is a 4xx. Blank text is rejected, and a burst past the limit gets
+  429.
+- chatting creates no marks (the mark count in `/archive.json` doesn't
+  change), and once the room empties a newcomer gets no history
+
+The SSE checks must close every stream they open (`AbortController`) so the
+test run never hangs. Don't wait out real timers longer than necessary: make
+the grace period and limits configurable by env var for the test container
+if you need to. If you do, keep the production defaults in the code.
 
 Keep `spec/invariants.test.ts` green and every existing spec passing.
 `pnpm check` must be green against a locally running app before each push.
@@ -247,11 +398,18 @@ screenshots: the tree mostly dark on a fresh cookie, a mark mid-ignition, a
 completed week with its crown, and the HUD counter. For time travel, also
 capture the timeline bar, the tree rewound to mid-week, the thread and comet
 mid-scrub, and playback crossing a seal. Seed marks across at least three
-weeks with replies, so the thread visibly hops between branches. Check there
-are no console errors, that fast key-repeat doesn't snap the camera, that
-leaving time travel restores the full tree, and that the list view and JS-off
-pages still work. Then judge it: if arriving doesn't feel like an event, or
-the rewind doesn't feel like turning back time, tune it until it does.
+weeks with replies, so the thread visibly hops between branches. For
+presence and chat, open two or three browser contexts with separate cookies
+and different `name` cookies. Screenshot one context watching another's wisp
+fly between branches, an off-screen chip, two wisps at one mark with the chat
+panel open, and a speech bubble. Check that hiding the tab closes the stream
+and showing it again restores your wisp for the others. Check there are no
+console errors, that fast key-repeat doesn't snap the camera, that leaving
+time travel restores the full tree, that typing in chat never moves you, and
+that the list view and JS-off pages still work. Then judge it: if arriving
+doesn't feel like an event, the rewind doesn't feel like turning back time,
+or meeting someone at a mark doesn't feel like bumping into them, tune it
+until it does.
 
 ## Docs
 
@@ -263,28 +421,50 @@ dark archive the day this ships. Add a paragraph on time travel: the tree
 shows who answered whom, and the time line shows when. Replaying a week is
 how you see a conversation's real rhythm. Seals are where the timeline's
 promise ("nothing can be added afterwards") becomes something you can watch
-happen. Add the new keys to the README's archive section. Add one line to the rules block in
-`CLAUDE.md` (below the riff block, which stays untouched) covering the `seen`
-table: it's per-visitor, never exposed, and there are no read receipts.
+happen. Add a section on being in the archive together. A room of a dozen
+mostly meets at crits, and this makes the archive somewhere you can bump into
+each other. Chat is deliberately ephemeral: marks are what you keep, chat is
+what you say while standing there. That's why chatting in a sealed week
+doesn't break the seal. Rewrite "What's deliberately not here yet" to match:
+presence is live, marks still aren't. Add the new keys to the README's
+archive section.
+
+Add two lines to the rules block in `CLAUDE.md` (below the riff block, which
+stays untouched):
+
+- the `seen` table is per-visitor, never exposed, and there are no read
+  receipts
+- presence and chat are in memory only, never written to SQLite and never
+  logged. They use ephemeral presence ids, never `visitor_id`, over SSE with
+  no dependency, and every POST is checked against the visitor cookie that
+  owns the presence id.
 
 ## Leave alone
 
-- No accounts, no new dependencies (Web Audio and three.js cover all of
-  this), no build step, no CDN.
+- No accounts, no new dependencies (Web Audio, SSE and three.js cover all of
+  this, so no `ws` and no socket library), no build step, no CDN. Chat names
+  come from the existing `name` cookie; don't add a profile or a sign-in.
 - Posting, replying, sealing, week arithmetic and the lazy rollover. None of
   it changes.
 - What the existing keys *mean* (`move()` in `archive-tree.js`) and the tree
   layout. This run changes how movement *feels*, not where it goes. Time
   travel only hides what didn't exist yet; it never repositions nodes. Add
-  the new keys (`T`, `Space`, `,`, `.`) to the legend without changing the
-  old ones.
-- Time travel needs no server change and no schema change.
+  the new keys (`T`, `Space`, `,`, `.`, `P`, `W`) to the legend without
+  changing the old ones.
+- Time travel needs no server change and no schema change. Presence and chat
+  need no schema change at all; they never touch SQLite.
+- The home page and mark pages get no presence or chat. They stay the plain,
+  JS-optional pages they are. Presence and chat live in the archive scene.
 - User text still goes in via `textContent` only on the client and
   `escapeHtml` on the server.
 - The list view stays complete and readable for screen readers and JS-off
   visitors.
 
-Commit in small, deployable steps (server + specs, then game feel, then fog
-of war, then time travel, then docs), and keep `main` green throughout. If
-you run short, ship parts 1 and 2 complete and polished before starting
-part 3. A finished, good-feeling smaller game beats three half-done ones.
+Commit in small, deployable steps (seen-state server + specs, game feel, fog
+of war, time travel, presence server + specs, wisps, chat, docs), and keep
+`main` green throughout. Finish each part, complete and polished, before
+starting the next, in the order 1, 2, 4, 3. Presence and chat come before
+time travel because being in the archive together is what the room asked
+for most. If you run short, a finished, good-feeling smaller game beats four
+half-done ones. Whatever didn't get built goes in the README's "not here
+yet" section, so the next run can pick it up.
